@@ -1,11 +1,11 @@
 # -*-coding:utf-8-*-
 import time
-import robomaster
+
 from robomaster import robot
 import pandas as pd
 import threading
 import copy
-
+import robomaster
 # --- 1. โครงสร้างข้อมูลสำหรับเก็บค่าล่าสุดและ list สำหรับบันทึก ---
 
 # Dictionary สำหรับเก็บสถานะล่าสุดของเซ็นเซอร์ทั้งหมด
@@ -95,8 +95,8 @@ if __name__ == '__main__':
     print("Data logger thread started.")
 
     # Subscribe ข้อมูลทั้งหมด โดยใช้ handler ของตัวเอง
-    ep_chassis.sub_position(freq=5, callback=position_handler)
-    ep_chassis.sub_attitude(freq=5, callback=attitude_handler)
+    ep_chassis.sub_position(freq=10, callback=position_handler)
+    ep_chassis.sub_attitude(freq=10, callback=attitude_handler)
     ep_chassis.sub_imu(freq=10, callback=imu_handler)
     ep_chassis.sub_esc(freq=10, callback=esc_handler)
     ep_chassis.sub_status(freq=10, callback=status_handler)
