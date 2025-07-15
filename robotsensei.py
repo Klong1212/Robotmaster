@@ -74,7 +74,6 @@ def data_logger(log_interval):
     while not stop_event.is_set():
         # คัดลอกสถานะล่าสุดเพื่อป้องกันปัญหาข้อมูลเปลี่ยนขณะบันทึก
         current_log = copy.deepcopy(robot_state)
-        current_log['timestamp'] = pd.Timestamp.now()
         data_log.append(current_log)
         time.sleep(log_interval) # รอตามช่วงเวลาที่กำหนด
     print("Data logger thread stopped.")
