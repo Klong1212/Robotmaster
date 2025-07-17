@@ -37,7 +37,7 @@ deactivate () {
 # unset irrelevant variables
 deactivate nondestructive
 
-VIRTUAL_ENV="C:\Users\asus\Desktop\Lab01x\myrobot"
+VIRTUAL_ENV="C:\Users\asus\Documents\GitHub\Robotmaster\myrobot"
 export VIRTUAL_ENV
 
 _OLD_VIRTUAL_PATH="$PATH"
