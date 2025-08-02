@@ -87,14 +87,7 @@ if __name__ == '__main__':
                     selected_target = sorted_markers[2]
             
             # --- ส่วนแสดงผลกล้อง ---
-
-            try:
-                img = ep_camera.read_cv2_image(strategy="newest", timeout=0.5)
-            except Exception as e:
-                # ถ้าดึงภาพไม่สำเร็จ ให้ข้ามไปรอบถัดไป
-                print(f"Could not read image from camera: {e}")
-                continue
-
+            img = ep_camera.read_cv2_image(strategy="newest", timeout=0.5)
             if img is not None:
                 cv2.imshow("Live View", img)
                 if cv2.waitKey(1) & 0xFF == ord('q'): break
