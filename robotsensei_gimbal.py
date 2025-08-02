@@ -7,6 +7,8 @@ import math
 import cv2
 import threading
 import csv
+import traceback
+import queue
 
 # --- PID Controller Class ---
 class PIDController:
@@ -53,12 +55,17 @@ def camera_thread_func(ep_camera):
     global latest_frame
     while not stop_event.is_set():
         try:
-            img = ep_camera.read_cv2_image(strategy="newest", timeout=0.5)
+            img = ep_camera.read_cv2_image(strategy="fifo", timeout=1.0)
             if img is not None:
                 latest_frame = img
+            else:
+                print("[Camera] No frame received")
+        except queue.Empty:
+            print("[Camera] Frame queue empty. Retrying...")
         except Exception as e:
-            print(f"Camera thread error: {e}")
-        time.sleep(0.033)  # ~30 FPS
+            print("Camera thread error:")
+            traceback.print_exc()
+        time.sleep(0.033)
 
 if __name__ == '__main__':
     print("Initializing...")
@@ -95,7 +102,8 @@ if __name__ == '__main__':
     time.sleep(2)
 
     ep_gimbal.sub_angle(freq=20, callback=sub_gimbal_angle_handler)
-    ep_camera.start_video_stream(display=False, resolution=camera.STREAM_720P)
+    ep_camera.start_video_stream(display=False, resolution=camera.STREAM_360P)
+    time.sleep(1.0)  # รอกล้องเริ่มก่อน thread จะดึงภาพ
 
     ep_vision.sub_detect_info(name="marker", callback=on_detect_marker)
 
@@ -174,7 +182,7 @@ if __name__ == '__main__':
                         print(f"\n  [Fine] Target locked!")
                         ep_gimbal.drive_speed(yaw_speed=0, pitch_speed=0)
                         time.sleep(0.5)
-                        ep_blaster.fire(fire_type='ir', times=1)
+                        ep_blaster.fire(times=1)
                         print("FIRE!")
                         time.sleep(1)
                         break
