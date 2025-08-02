@@ -118,6 +118,7 @@ if __name__ == "__main__":
     time.sleep(1)
     
     # Start moving
+    t_detect = time.time()
     ep_chassis.drive_speed(x=0.25, y=0, z=0)
     print("Robot started moving...")
     
@@ -129,7 +130,18 @@ if __name__ == "__main__":
             raw_distance = robot_graph['tof']
             
             print(f"Raw: {raw_distance:.1f} mm | MA: {tof_distance_MA:.1f} mm | ME: {tof_distance_ME:.1f} mm | LP: {tof_distance_LP:.1f} mm")
-            
+            if tof_distance_MA <= 400:
+                t_stop_command = time.time()
+                response_time = t_stop_command - t_detect
+                print(f"Obstacle detected at {tof_distance_MA:.1f} mm, stopping robot...")
+            if tof_distance_ME <= 400:
+                t_stop_command = time.time()
+                response_time = t_stop_command - t_detect
+                print(f"Obstacle detected at {tof_distance_ME:.1f} mm, stopping robot...")
+            if tof_distance_LP <= 400:
+                t_stop_command = time.time()
+                response_time = t_stop_command - t_detect
+                print(f"Obstacle detected at {tof_distance_LP:.1f} mm, stopping robot...")
             # Check if all filters detect obstacle within 400mm
             if tof_distance_MA <= 400 and tof_distance_ME <= 400 and tof_distance_LP <= 400:
                 # Calculate MAE properly using data_count
@@ -140,10 +152,14 @@ if __name__ == "__main__":
                 else:
                     MAE_ma = MAE_me = MAE_lp = 0
                 
-                t_detect = time.time()
-                ep_chassis.drive_speed(x=0, y=0, z=0)  # หยุดหุ่นยนต์
-                t_stop_command = time.time()
-                response_time = t_stop_command - t_detect
+                ep_chassis.drive_speed(x=0, y=0, z=0)  # สั่งหยุดด้วยความเร็ว 0
+                ep_chassis.move(x=0, y=0, z=0).wait_for_completed()  # รอให้หยุดสนิท
+                ep_chassis.sub_position(freq=50, callback=None)  #ยกเลิกการติดตามตำแหน่ง
+                ep_chassis.stick_overlay(0, 0, 0, 0)  # ยกเลิกคำสั่งที่ค้างอยู่
+                
+                # เพิ่มแรงต้านเพื่อหยุด
+                ep_chassis.drive_wheels(0, 0, 0, 0)  # หยุดล้อทั้งหมด
+                
                 
                 print(f"\n{'='*50}")
                 print("OBSTACLE DETECTED - ROBOT STOPPED")
@@ -180,9 +196,10 @@ if __name__ == "__main__":
             # จัดลําดับคอลัมน์ให้สวยงาม
             cols = ['timestamp', 'tof', 'filter_MA_tof', 'filter_ME_tof', 'filter_LP_tof']
             df = df[cols]
-            df.to_csv("distance_speed.csv", index=False)
+            df.to_csv("distance_speed_filter.csv", index=False)
             print(f"Data saved to distance_speed.csv successfully. ({len(data_log)} records)")
         else:
             print("No data to save.")
         
         print("Program completed.")
+# end Raw TOF: 351.0, MA: 376.8, ME: 379.0, LP: 391.7           
