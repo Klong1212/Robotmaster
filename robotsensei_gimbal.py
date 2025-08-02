@@ -10,7 +10,7 @@ import csv
 import traceback
 import queue
 
-# --- PID Controller Class ---
+# --- PID Controller Class (ไม่เปลี่ยนแปลง) ---
 class PIDController:
     def __init__(self, kp, ki, kd):
         self.kp = kp; self.ki = ki; self.kd = kd
@@ -36,7 +36,7 @@ class PIDController:
         self.integral = 0
         self.last_time = time.time()
 
-# --- Global Variables & Callbacks ---
+# --- Global Variables & Callbacks (ไม่เปลี่ยนแปลง) ---
 current_yaw_angle = 0.0
 g_detected_markers = []
 
@@ -102,8 +102,9 @@ if __name__ == '__main__':
     time.sleep(2)
 
     ep_gimbal.sub_angle(freq=20, callback=sub_gimbal_angle_handler)
+    # หมายเหตุ: 360P ให้ FPS ที่เสถียรกว่า แต่ 720P ให้ภาพที่ชัดกว่า (อาจแลกกับ FPS ที่ลดลง)
     ep_camera.start_video_stream(display=False, resolution=camera.STREAM_360P)
-    time.sleep(1.0)  # รอกล้องเริ่มก่อน thread จะดึงภาพ
+    time.sleep(1.0)
 
     ep_vision.sub_detect_info(name="marker", callback=on_detect_marker)
 
@@ -154,13 +155,15 @@ if __name__ == '__main__':
             while time.time() - fine_tune_start_time < 10:
                 img = latest_frame
                 if img is not None:
-                    display_img = cv2.resize(img, (960, 540))
-                    cv2.imshow("Live View (720p)", display_img)
+                    # ปรับขนาดเพื่อแสดงผล แต่การประมวลผลยังใช้ marker ที่ได้จากภาพเต็ม
+                    display_img = cv2.resize(img, (720, 480))
+                    cv2.imshow("Live View", display_img)
                     cv2.waitKey(1)
 
                 target_marker = None
                 min_dist_from_center = float('inf')
 
+                # ใช้ g_detected_markers ที่ callback อัปเดตให้
                 for m in g_detected_markers:
                     dist_x = abs(m[0] - 0.5)
                     if dist_x < min_dist_from_center:
@@ -181,10 +184,16 @@ if __name__ == '__main__':
                     if abs(error_x) < FINE_AIM_TOLERANCE_X and abs(error_y) < FINE_AIM_TOLERANCE_Y:
                         print(f"\n  [Fine] Target locked!")
                         ep_gimbal.drive_speed(yaw_speed=0, pitch_speed=0)
-                        time.sleep(0.5)
-                        ep_blaster.fire(times=1)
+                        time.sleep(0.5) # รอให้ gimbal นิ่งสนิท
+
+                        # =========================================================
+                        # === แก้ไขตรงนี้: เปลี่ยนเป็นกระสุนจริง (Gel Beads) ===
+                        # ⚠️ คำเตือน: ตรวจสอบให้แน่ใจว่าอยู่ในพื้นที่ปลอดภัย!
+                        ep_blaster.fire(fire_type='ir',times=1)
+                        # =========================================================
+
                         print("FIRE!")
-                        time.sleep(1)
+                        time.sleep(1) # รอหลังยิงเพื่อให้หุ่นยนต์นิ่ง
                         break
 
                     ep_gimbal.drive_speed(yaw_speed=yaw_speed_vision, pitch_speed=pitch_speed_vision)
@@ -196,14 +205,14 @@ if __name__ == '__main__':
 
                 time.sleep(0.033)  # Match ~30 FPS
 
-            else:
+            else: # กรณีหมดเวลาใน while loop
                 print("\n  [Fine] Could not lock target in time.")
 
     finally:
         print("\n--- Mission Completed, Cleaning up ---")
 
         # Save CSV
-        log_filename = "gimbal_log_720p.csv"
+        log_filename = "gimbal_log_gel_fire.csv"
         print(f"Saving log data to {log_filename}...")
         with open(log_filename, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
@@ -213,9 +222,12 @@ if __name__ == '__main__':
 
         # Clean up
         stop_event.set()
-        cam_thread.join()
+        if cam_thread.is_alive():
+            cam_thread.join()
         cv2.destroyAllWindows()
+        ep_gimbal.drive_speed(yaw_speed=0, pitch_speed=0)
         ep_gimbal.unsub_angle()
         ep_vision.unsub_detect_info(name="marker")
         ep_camera.stop_video_stream()
         ep_robot.close()
+        print("Cleanup complete. Program terminated.")
