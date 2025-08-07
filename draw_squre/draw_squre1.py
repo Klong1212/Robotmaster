@@ -1,151 +1,100 @@
-# -*-coding:utf-8-*-
-import robomaster
 from robomaster import robot
+import pandas as pd
 import time
 import math
-import pandas as pd
 
-# --- 1. PID Controller Class (ไม่เปลี่ยนแปลง) ---
+data_log = []
+start_time = time.time()
+latest_data = {"position_x": 0, "position_y": 0, "position_z": 0}
+
+# === PID Controller ===
 class PIDController:
     def __init__(self, kp, ki, kd):
         self.kp, self.ki, self.kd = kp, ki, kd
         self.integral = 0
         self.last_error = 0
-        self.last_time = time.time()
 
-    def compute(self, error):
-        current_time = time.time()
-        dt = current_time - self.last_time
-        if dt <= 0.001:  # ป้องกันการหารด้วยศูนย์
-            dt = 0.001
-        
+    def compute(self, target, current, dt):
+        error = target - current
+        if error > 180:
+            error -= 360
+        elif error < -180:
+            error += 360
         self.integral += error * dt
         derivative = (error - self.last_error) / dt
-        
-        output = self.kp * error + self.ki * self.integral + self.kd * derivative
-        
         self.last_error = error
-        self.last_time = current_time
-        return output
+        return self.kp * error + self.ki * self.integral + self.kd * derivative
 
-    def reset(self):
-        self.integral = 0
-        self.last_error = 0
-        self.last_time = time.time()
+def get_current_yaw(ep_robot):
+    imu_data = ep_robot.sensor.imu.get_imu_data()
+    return imu_data[0]  # ต้องเช็กจาก SDK ว่า index 0 คือ yaw จริงหรือไม่
 
-# --- 2. Global Variables & Callback Functions ---
-robot_position = {'x': 0, 'y': 0}
-robot_attitude = {'yaw': 0, 'pitch': 0, 'roll': 0}
-data_log = []
+def pid_turn(ep_robot, target_angle, kp=0.8, ki=0.0, kd=0.05):
+    pid = PIDController(kp, ki, kd)
+    while True:
+        start_t = time.time()
+        current_yaw = get_current_yaw(ep_robot)
+        control = pid.compute(target_angle, current_yaw, time.time() - start_t)
+        control = max(min(control, 60), -60)  # เพิ่มความเร็วหมุน
+        if abs(target_angle - current_yaw) < 1.0:
+            ep_robot.chassis.drive_speed(x=0, y=0, z=0, timeout=0.05)
+            break
+        ep_robot.chassis.drive_speed(x=0, y=0, z=control, timeout=0.05)
 
+def pid_go(ep_robot, target_x, target_y, kp=0.8, ki=0.0, kd=0.05):
+    pid_x = PIDController(kp, ki, kd)
+    pid_y = PIDController(kp, ki, kd)
+    while True:
+        start_t = time.time()
+        current_x = latest_data["position_x"]
+        current_y = latest_data["position_y"]
+        dt = time.time() - start_t
+
+        control_x = pid_x.compute(target_x, current_x, dt)
+        control_y = pid_y.compute(target_y, current_y, dt)
+
+        # # เพิ่มขีดจำกัดความเร็ว
+        # control_x = max(min(control_x, 1.0), -1.0)
+        # control_y = max(min(control_y, 1.0), -1.0)
+
+        if abs(target_x - current_x) < 0.02 and abs(target_y - current_y) < 0.02:
+            ep_robot.chassis.drive_speed(x=0, y=0, z=0, timeout=0.05)
+            break
+        print(f"Control X: {control_x}, Control Y: {control_y}")  # Debugging
+        ep_robot.chassis.drive_speed(x=control_x, y=control_y, z=0, timeout=0.05)
+
+# === Logging ===
 def position_handler(data):
     x, y, z = data
-    robot_position['x'] = x
-    robot_position['y'] = y
+    latest_data.update({"position_x": x, "position_y": y, "position_z": z})
 
-def attitude_handler(data):
-    yaw, pitch, roll = data
-    robot_attitude['yaw'] = yaw
 
-# --- 3. ฟังก์ชันควบคุมการเคลื่อนที่ ---
-def pid_move_forward(ep_chassis, target_distance, kp=1.5, ki=0.05, kd=0.3):
-    pid = PIDController(kp, ki, kd)
-    start_pos = robot_position.copy()
-
-    while True:
-        distance_traveled = math.sqrt((robot_position['x'] - start_pos['x'])**2 + (robot_position['y'] - start_pos['y'])**2)
-        error = target_distance - distance_traveled
-        
-        if abs(error) < 0.02: # Tolerance 2 ซม.
-            ep_chassis.drive_speed(x=0, y=0, z=0)
-            break
-            
-        control_speed = pid.compute(error)
-        control_speed = max(min(control_speed, 0.7), -0.7)
-        ep_chassis.drive_speed(x=control_speed, y=0, z=0)
-        
-        # ★ แก้ไข: เพิ่ม current_x และ current_y
-        log_entry = {
-            'timestamp': time.time(), 
-            'action': 'move', 
-            'target': target_distance,
-            'current_x': robot_position['x'],
-            'current_y': robot_position['y'],
-            'current_distance': distance_traveled, 
-            'error': error, 
-            'output': control_speed
-        }
-        data_log.append(log_entry)
-        
-        time.sleep(0.02)
-
-def pid_turn(ep_chassis, target_angle, kp=1.5, ki=0.05, kd=0.3):
-    pid = PIDController(kp, ki, kd)
-    
-    while True:
-        current_yaw = robot_attitude['yaw']
-        error = target_angle - current_yaw
-        
-        if error > 180: error -= 360
-        if error < -180: error += 360
-
-        if abs(error) < 1.0: # Tolerance 1 องศา
-            ep_chassis.drive_speed(x=0, y=0, z=0)
-            break
-
-        control_speed = pid.compute(error)
-        control_speed = max(min(control_speed, 80), -80)
-        ep_chassis.drive_speed(x=0, y=0, z=control_speed)
-        
-        # ★ แก้ไข: เพิ่ม current_x, current_y และเปลี่ยนชื่อ 'current'
-        log_entry = {
-            'timestamp': time.time(), 
-            'action': 'turn', 
-            'target': target_angle, 
-            'current_x': robot_position['x'],
-            'current_y': robot_position['y'],
-            'current_yaw': current_yaw, 
-            'error': error, 
-            'output': control_speed
-        }
-        data_log.append(log_entry)
-        
-        time.sleep(0.02)
-
-# --- 4. Main Program ---
+# === Main ===
 if __name__ == '__main__':
     ep_robot = robot.Robot()
     ep_robot.initialize(conn_type="ap")
 
     ep_chassis = ep_robot.chassis
-    ep_chassis.sub_position(freq=50, callback=position_handler)
-    ep_chassis.sub_attitude(freq=50, callback=attitude_handler)
-    time.sleep(2)
+    ep_gimbal = ep_robot.gimbal
 
-    side_length = 0.6
-    
-    # === วนลูป 4 ครั้งเพื่อวาดสี่เหลี่ยม ===
-    
-    for i in range(4):
-        print(f"\n--- Side {i+1}/4: Moving forward {side_length}m ---")
-        pid_move_forward(ep_chassis, side_length)
-        time.sleep(1)
+    # เริ่ม subscription
+    ep_gimbal.moveto(pitch=0, yaw=0).wait_for_completed()
+    ep_chassis.sub_position(freq=10, callback=position_handler)
+    target_position=[[0,0.6],[0.6,0.6],[0.6,0],[0,0]]
+    current_angle = 0.0
+    for i in target_position:
+        print(i)
+        pid_go(ep_robot, i[0], i[1])
+        current_angle += 90
+        if current_angle >= 360:
+            current_angle -= 360
+        pid_turn(ep_robot, current_angle)
 
-        target_yaw = robot_attitude['yaw'] + 90
-        if target_yaw > 180:
-            target_yaw -= 360
-        
-        print(f"\n--- Side {i+1}/4: Turning to {target_yaw:.1f} degrees ---")
-        pid_turn(ep_chassis, target_yaw)
-        time.sleep(1)
-
-    # --- จบการทำงานและบันทึกข้อมูล ---
     ep_chassis.unsub_position()
-    ep_chassis.unsub_attitude()
-    
-    if data_log:
-        df = pd.DataFrame(data_log)
-        df.to_csv("square_pid_log_with_xy_15_001_08.csv", index=False)
-        print("\n✅ Data saved to square_pid_log_with_xy_2.csv")
+
+    # Save CSV
+    df = pd.DataFrame(data_log)
+    df.to_csv("draw_square_pid.csv", index=False)
+    print("✅ Data saved to draw_square_pid.csv")
 
     ep_robot.close()
