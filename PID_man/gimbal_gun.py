@@ -1,6 +1,5 @@
 # -*-coding:utf-8-*-
 
-import robomaster
 from robomaster import robot, vision, camera
 import time
 import math
@@ -19,7 +18,7 @@ class PIDController:
     def compute(self, error):
         current_time = time.time()
         dt = current_time - self.last_time
-        if dt <= 0: return 0
+        if dt <= 0.001: dt = 0.001
         p_term = self.kp * error
         self.integral += error * dt
         i_term = self.ki * self.integral
@@ -36,22 +35,22 @@ class PIDController:
         self.last_time = time.time()
 
 # --- 2. Global Variables & Callback Functions ---
-# ★ Lock ไม่จำเป็นแล้ว เพราะไม่มี Thread แยกสำหรับกล้อง
 current_yaw_angle = 0.0
 current_pitch_angle = 0.0
 g_detected_markers = []
+data_lock = threading.Lock() # Lock ยังจำเป็นสำหรับ Callbacks
 
 def sub_gimbal_angle_handler(angle_info):
     global current_yaw_angle, current_pitch_angle
-    current_pitch_angle, current_yaw_angle = angle_info[0], angle_info[1]
+    with data_lock:
+        current_pitch_angle, current_yaw_angle = angle_info[0], angle_info[1]
 
 def on_detect_marker(marker_info):
     global g_detected_markers
-    g_detected_markers = marker_info
+    with data_lock:
+        g_detected_markers = marker_info
 
-# ★ ลบ Camera Thread ทั้งหมดออก
-
-# --- 4. Main Program ---
+# --- 3. Main Program ---
 if __name__ == '__main__':
     # ... (ส่วนตั้งค่าภารกิจและ Log header เหมือนเดิม) ...
     DISTANCE_ROBOT_TO_TARGET_LINE = 1.0
@@ -83,12 +82,10 @@ if __name__ == '__main__':
 
         # --- การ Subscribe ข้อมูล ---
         ep_gimbal.sub_angle(freq=20, callback=sub_gimbal_angle_handler)
-        # ★ แก้ไข: เปิด Video Stream ให้ SDK แสดงผลเอง
-        ep_camera.start_video_stream(display=True, resolution=camera.STREAM_360P)
+        # ★ ตั้งค่า display=False แต่ยังคงเปิด stream เพื่อให้ vision ทำงาน
+        ep_camera.start_video_stream(display=False, resolution=camera.STREAM_360P)
         ep_vision.sub_detect_info(name="marker", callback=on_detect_marker)
         
-        # ★ ลบการสร้างและเริ่ม Camera Thread
-
         # ... (ส่วน PID Controllers และ Tolerances เหมือนเดิม) ...
         angle_pid = PIDController(kp=4.5, ki=0.1, kd=3.5)
         vision_yaw_pid = PIDController(kp=180, ki=5, kd=10)
@@ -104,12 +101,15 @@ if __name__ == '__main__':
             # === Stage 1: Coarse Aiming ===
             angle_pid.reset()
             while True:
-                error = target_yaw - current_yaw_angle
+                with data_lock:
+                    error = target_yaw - current_yaw_angle
+                
                 yaw_speed = angle_pid.compute(error)
                 ep_gimbal.drive_speed(yaw_speed=yaw_speed, pitch_speed=0)
                 
                 timestamp = time.time() - start_time
-                log_row = [timestamp, 'coarse', target_yaw, current_yaw_angle, current_pitch_angle, error, yaw_speed, '', '', '', '']
+                with data_lock:
+                    log_row = [timestamp, 'coarse', target_yaw, current_yaw_angle, current_pitch_angle, error, yaw_speed, '', '', '', '']
                 log_data.append(log_row)
 
                 if abs(error) < COARSE_AIM_TOLERANCE:
@@ -124,11 +124,10 @@ if __name__ == '__main__':
             
             target_locked = False
             while time.time() - fine_tune_start_time < 5:
-                # ★ ไม่ต้องอ่าน frame เองแล้ว
+                with data_lock:
+                    local_markers = g_detected_markers
                 
                 target_marker = None
-                # g_detected_markers จะถูกอัปเดตโดย callback ใน background
-                local_markers = g_detected_markers
                 if local_markers:
                     target_marker = min(local_markers, key=lambda m: abs(m[0] - 0.5))
 
@@ -141,7 +140,8 @@ if __name__ == '__main__':
                     pitch_speed = vision_pitch_pid.compute(error_y)
                     ep_gimbal.drive_speed(yaw_speed=yaw_speed, pitch_speed=pitch_speed)
                     
-                    log_row = [timestamp, 'fine_tuning', target_yaw, current_yaw_angle, current_pitch_angle, '', error_x, error_y, yaw_speed, pitch_speed]
+                    with data_lock:
+                        log_row = [timestamp, 'fine_tuning', target_yaw, current_yaw_angle, current_pitch_angle, '', error_x, error_y, yaw_speed, pitch_speed]
                     log_data.append(log_row)
 
                     if abs(error_x) < FINE_AIM_TOLERANCE_X and abs(error_y) < FINE_AIM_TOLERANCE_Y:
@@ -149,9 +149,9 @@ if __name__ == '__main__':
                         break
                 else:
                     ep_gimbal.drive_speed(yaw_speed=0, pitch_speed=0)
-                    log_row = [timestamp, 'searching', target_yaw, current_yaw_angle, current_pitch_angle, '', '', '', '', '']
+                    with data_lock:
+                        log_row = [timestamp, 'searching', target_yaw, current_yaw_angle, current_pitch_angle, '', '', '', '', '']
                     log_data.append(log_row)
-                
                 time.sleep(0.02)
 
             # === Stage 3: Firing ===
@@ -164,15 +164,18 @@ if __name__ == '__main__':
 
     except KeyboardInterrupt:
         print("\nProgram interrupted by user.")
+    except Exception as e:
+        print(f"\n!!! An unexpected error occurred: {e}")
+        traceback.print_exc()
+
     finally:
         print("\n--- Mission End, Cleaning up ---")
-        # ★ ไม่ต้องจัดการ Thread และ cv2 แล้ว
         ep_gimbal.drive_speed(yaw_speed=0, pitch_speed=0)
         ep_gimbal.unsub_angle()
         ep_vision.unsub_detect_info(name="marker")
         ep_camera.stop_video_stream()
         
-        log_filename = "gimbal_mission_log_vision.csv"
+        log_filename = "gimbal_log_no_cv2.csv"
         print(f"Saving log data to {log_filename}...")
         with open(log_filename, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
