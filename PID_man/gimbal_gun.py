@@ -1,5 +1,6 @@
 # -*-coding:utf-8-*-
 
+import robomaster
 from robomaster import robot, vision, camera
 import time
 import math
@@ -18,7 +19,7 @@ class PIDController:
     def compute(self, error):
         current_time = time.time()
         dt = current_time - self.last_time
-        if dt <= 0.001: dt = 0.001
+        if dt <= 0: return 0
         p_term = self.kp * error
         self.integral += error * dt
         i_term = self.ki * self.integral
@@ -50,7 +51,22 @@ def on_detect_marker(marker_info):
     with data_lock:
         g_detected_markers = marker_info
 
-# --- 3. Main Program ---
+# ★ เพิ่มเข้ามา: ฟังก์ชันสำหรับบันทึก CSV โดยเฉพาะ
+def save_log(log_data, header, filename):
+    if not log_data:
+        print("No log data to save.")
+        return
+    try:
+        print(f"\nSaving {len(log_data)} records to {filename}...")
+        with open(filename, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(header)
+            writer.writerows(log_data)
+        print("Log data saved successfully.")
+    except Exception as e:
+        print(f"!!! Failed to save log data: {e}")
+
+# --- 4. Main Program ---
 if __name__ == '__main__':
     # ... (ส่วนตั้งค่าภารกิจและ Log header เหมือนเดิม) ...
     DISTANCE_ROBOT_TO_TARGET_LINE = 1.0
@@ -87,18 +103,17 @@ if __name__ == '__main__':
         ep_vision.sub_detect_info(name="marker", callback=on_detect_marker)
         
         # ... (ส่วน PID Controllers และ Tolerances เหมือนเดิม) ...
-        angle_pid = PIDController(kp=4.5, ki=0.1, kd=3.5)
-        vision_yaw_pid = PIDController(kp=180, ki=5, kd=10)
-        vision_pitch_pid = PIDController(kp=180, ki=5, kd=10)
+        angle_pid = PIDController(kp=4.5, ki=0, kd=3)
+        vision_yaw_pid = PIDController(kp=180, ki=0, kd=10)
+        vision_pitch_pid = PIDController(kp=180, ki=0, kd=10)
         COARSE_AIM_TOLERANCE = 3.0
         FINE_AIM_TOLERANCE_X = 0.01
         FINE_AIM_TOLERANCE_Y = 0.01
         
         start_time = time.time()
         for target_yaw in mission_sequence:
+            # ... (ส่วนของ Stage 1 และ Stage 2 เหมือนเดิมทุกประการ) ...
             print(f"\n--- Mission: Target Yaw {target_yaw}° ---")
-
-            # === Stage 1: Coarse Aiming ===
             angle_pid.reset()
             while True:
                 with data_lock:
@@ -117,11 +132,10 @@ if __name__ == '__main__':
                     break
                 time.sleep(0.01)
 
-            # === Stage 2: Fine-Tuning ===
+            # Stage 2
             vision_yaw_pid.reset()
             vision_pitch_pid.reset()
             fine_tune_start_time = time.time()
-            
             target_locked = False
             while time.time() - fine_tune_start_time < 5:
                 with data_lock:
@@ -153,9 +167,10 @@ if __name__ == '__main__':
                         log_row = [timestamp, 'searching', target_yaw, current_yaw_angle, current_pitch_angle, '', '', '', '', '']
                     log_data.append(log_row)
                 time.sleep(0.02)
-
-            # === Stage 3: Firing ===
+            
+            # Stage 3
             if target_locked:
+                ep_gimbal.drive_speed(yaw_speed=0, pitch_speed=0)
                 print("  [Fine] Target locked! FIRING!")
                 ep_blaster.fire(fire_type='ir', times=1)
                 time.sleep(1)
@@ -170,18 +185,12 @@ if __name__ == '__main__':
 
     finally:
         print("\n--- Mission End, Cleaning up ---")
+        
+        save_log(log_data, log_header, "gimbal_log_no_cv2_DHigh.csv")
+        
         ep_gimbal.drive_speed(yaw_speed=0, pitch_speed=0)
         ep_gimbal.unsub_angle()
         ep_vision.unsub_detect_info(name="marker")
         ep_camera.stop_video_stream()
-        
-        log_filename = "gimbal_log_no_cv2.csv"
-        print(f"Saving log data to {log_filename}...")
-        with open(log_filename, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow(log_header)
-            writer.writerows(log_data)
-        print("Log data saved.")
-
         ep_robot.close()
         print("Cleanup complete.")
