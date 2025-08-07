@@ -10,23 +10,27 @@ import csv
 import traceback
 import queue
 
-# --- PID Controller Class (ไม่เปลี่ยนแปลง) ---
+# --- 1. PID Controller Class (ไม่เปลี่ยนแปลง) ---
 class PIDController:
     def __init__(self, kp, ki, kd):
-        self.kp = kp; self.ki = ki; self.kd = kd
-        self.last_error = 0; self.integral = 0
+        self.kp, self.ki, self.kd = kp, ki, kd
+        self.last_error = 0
+        self.integral = 0
         self.last_time = time.time()
 
     def compute(self, error):
         current_time = time.time()
         dt = current_time - self.last_time
         if dt <= 0: return 0
+        
         p_term = self.kp * error
         self.integral += error * dt
         i_term = self.ki * self.integral
         derivative = (error - self.last_error) / dt
         d_term = self.kd * derivative
+        
         output = p_term + i_term + d_term
+        
         self.last_error = error
         self.last_time = current_time
         return max(min(output, 100), -100)
@@ -36,18 +40,20 @@ class PIDController:
         self.integral = 0
         self.last_time = time.time()
 
-# --- Global Variables & Callbacks (ไม่เปลี่ยนแปลง) ---
+# --- 2. Global Variables & Callback Functions ---
 current_yaw_angle = 0.0
+current_pitch_angle = 0.0
 g_detected_markers = []
 
 def sub_gimbal_angle_handler(angle_info):
-    global current_yaw_angle
-    current_yaw_angle = angle_info[1]
+    global current_yaw_angle, current_pitch_angle
+    current_pitch_angle, current_yaw_angle = angle_info[0], angle_info[1]
 
 def on_detect_marker(marker_info):
     global g_detected_markers
     g_detected_markers = marker_info
 
+# --- 3. Camera Thread ---
 latest_frame = None
 stop_event = threading.Event()
 
@@ -55,22 +61,16 @@ def camera_thread_func(ep_camera):
     global latest_frame
     while not stop_event.is_set():
         try:
-            img = ep_camera.read_cv2_image(strategy="fifo", timeout=1.0)
+            img = ep_camera.read_cv2_image(strategy="newest", timeout=0.5)
             if img is not None:
                 latest_frame = img
-            else:
-                print("[Camera] No frame received")
-        except queue.Empty:
-            print("[Camera] Frame queue empty. Retrying...")
-        except Exception as e:
-            print("Camera thread error:")
-            traceback.print_exc()
-        time.sleep(0.033)
+        except Exception:
+            print("Camera thread error:", traceback.format_exc())
+            time.sleep(1)
 
+# --- 4. Main Program ---
 if __name__ == '__main__':
-    print("Initializing...")
-
-    # ตั้งค่ามุมเป้าหมาย
+    # --- การตั้งค่าภารกิจ ---
     DISTANCE_ROBOT_TO_TARGET_LINE = 1.0
     DISTANCE_CENTER_TO_SIDE_TARGET = 0.6
     angle_rad = math.atan(DISTANCE_CENTER_TO_SIDE_TARGET / DISTANCE_ROBOT_TO_TARGET_LINE)
@@ -79,17 +79,18 @@ if __name__ == '__main__':
     TARGET_YAW_LEFT = -round(angle_deg, 2)
     TARGET_YAW_RIGHT = round(angle_deg, 2)
     TARGET_YAW_CENTER = 0.0
-    mission_sequence = [TARGET_YAW_LEFT, TARGET_YAW_CENTER, TARGET_YAW_RIGHT, TARGET_YAW_CENTER, TARGET_YAW_LEFT]
+    mission_sequence = [TARGET_YAW_LEFT, TARGET_YAW_CENTER, TARGET_YAW_RIGHT, TARGET_YAW_CENTER]
 
-    # --- เตรียมบันทึกข้อมูล ---
+    # --- ★ ส่วนที่ 1: เตรียมตัวแปรสำหรับเก็บข้อมูล CSV ---
     log_data = []
     log_header = [
-        'timestamp', 'stage', 'target_angle', 'current_angle',
-        'angle_error', 'angle_pid_output', 'marker_error_x', 'marker_error_y',
+        'timestamp', 'stage', 'target_yaw', 'current_yaw', 'current_pitch',
+        'yaw_error', 'angle_pid_output', 'marker_error_x', 'marker_error_y',
         'vision_yaw_pid_output', 'vision_pitch_pid_output'
     ]
+    # ---------------------------------------------------
 
-    # --- Initialize RoboMaster ---
+    # --- การเชื่อมต่อและตั้งค่าหุ่นยนต์ ---
     ep_robot = robot.Robot()
     ep_robot.initialize(conn_type="ap")
     ep_gimbal = ep_robot.gimbal
@@ -98,136 +99,116 @@ if __name__ == '__main__':
     ep_vision = ep_robot.vision
 
     ep_gimbal.moveto(pitch=0, yaw=0).wait_for_completed()
-    print("Robot initialized. Ready for hybrid mission.")
+    print("Robot initialized. Ready for mission.")
     time.sleep(2)
 
+    # --- การ Subscribe ข้อมูลและเริ่ม Thread ---
     ep_gimbal.sub_angle(freq=20, callback=sub_gimbal_angle_handler)
-    # หมายเหตุ: 360P ให้ FPS ที่เสถียรกว่า แต่ 720P ให้ภาพที่ชัดกว่า (อาจแลกกับ FPS ที่ลดลง)
     ep_camera.start_video_stream(display=False, resolution=camera.STREAM_360P)
-    time.sleep(1.0)
-
     ep_vision.sub_detect_info(name="marker", callback=on_detect_marker)
-
-
+    
     cam_thread = threading.Thread(target=camera_thread_func, args=(ep_camera,))
     cam_thread.start()
 
     # --- PID Controllers ---
-    angle_pid = PIDController(kp=5, ki=0.1, kd=4)
+    angle_pid = PIDController(kp=4.5, ki=0.1, kd=3.5)
     vision_yaw_pid = PIDController(kp=180, ki=5, kd=10)
     vision_pitch_pid = PIDController(kp=180, ki=5, kd=10)
-
-    COARSE_AIM_TOLERANCE = 4.0
+    
+    COARSE_AIM_TOLERANCE = 3.0
     FINE_AIM_TOLERANCE_X = 0.01
     FINE_AIM_TOLERANCE_Y = 0.01
 
     try:
         start_time = time.time()
-        for target_angle in mission_sequence:
-            print(f"\n--- Mission: Target Angle {target_angle} degrees ---")
+        for target_yaw in mission_sequence:
+            print(f"\n--- Mission: Target Yaw {target_yaw}° ---")
 
-            # --- Stage 1: Coarse Aiming ---
-            print("Stage 1: Coarse aiming...")
+            # === Stage 1: Coarse Aiming (เล็งหยาบด้วยมุม) ===
             angle_pid.reset()
-
             while True:
-                error = target_angle - current_yaw_angle
+                # ... (ตรรกะการเล็งหยาบ) ...
+                error = target_yaw - current_yaw_angle
                 yaw_speed = angle_pid.compute(error)
+                ep_gimbal.drive_speed(yaw_speed=yaw_speed, pitch_speed=0)
 
+                # --- ★ ส่วนที่ 2: บันทึกข้อมูลของแต่ละรอบลง List ---
                 timestamp = time.time() - start_time
-                log_row = [timestamp, 'coarse', target_angle, current_yaw_angle, error, yaw_speed, '', '', '', '']
+                log_row = [timestamp, 'coarse', target_yaw, current_yaw_angle, current_pitch_angle, error, yaw_speed, '', '', '', '']
                 log_data.append(log_row)
+                # ----------------------------------------------------
 
                 if abs(error) < COARSE_AIM_TOLERANCE:
-                    print("\n  [Coarse] Aim complete. Switching to fine-tuning.")
                     ep_gimbal.drive_speed(yaw_speed=0, pitch_speed=0)
                     break
-
-                ep_gimbal.drive_speed(yaw_speed=yaw_speed, pitch_speed=0)
                 time.sleep(0.01)
 
-            # --- Stage 2: Fine-Tuning with Vision ---
-            print("Stage 2: Fine-tuning with vision...")
+            # === Stage 2: Fine-Tuning (เล็งละเอียดด้วย Vision) ===
             vision_yaw_pid.reset()
             vision_pitch_pid.reset()
             fine_tune_start_time = time.time()
-
-            while time.time() - fine_tune_start_time < 10:
-                img = latest_frame
-                if img is not None:
-                    # ปรับขนาดเพื่อแสดงผล แต่การประมวลผลยังใช้ marker ที่ได้จากภาพเต็ม
-                    display_img = cv2.resize(img, (720, 480))
-                    cv2.imshow("Live View", display_img)
-                    cv2.waitKey(1)
-
+            
+            target_locked = False
+            while time.time() - fine_tune_start_time < 5:
+                # ... (ตรรกะการเล็งละเอียด) ...
                 target_marker = None
-                min_dist_from_center = float('inf')
-
-                # ใช้ g_detected_markers ที่ callback อัปเดตให้
-                for m in g_detected_markers:
-                    dist_x = abs(m[0] - 0.5)
-                    if dist_x < min_dist_from_center:
-                        min_dist_from_center = dist_x
-                        target_marker = m
+                if g_detected_markers:
+                    target_marker = min(g_detected_markers, key=lambda m: abs(m[0] - 0.5))
 
                 timestamp = time.time() - start_time
 
                 if target_marker:
                     error_x = target_marker[0] - 0.5
                     error_y = 0.5 - target_marker[1]
-                    yaw_speed_vision = vision_yaw_pid.compute(error_x)
-                    pitch_speed_vision = vision_pitch_pid.compute(error_y)
-
-                    log_row = [timestamp, 'fine_tuning', target_angle, current_yaw_angle, '', '', error_x, error_y, yaw_speed_vision, pitch_speed_vision]
+                    yaw_speed = vision_yaw_pid.compute(error_x)
+                    pitch_speed = vision_pitch_pid.compute(error_y)
+                    ep_gimbal.drive_speed(yaw_speed=yaw_speed, pitch_speed=pitch_speed)
+                    
+                    # --- ★ ส่วนที่ 2: บันทึกข้อมูลของแต่ละรอบลง List ---
+                    log_row = [timestamp, 'fine_tuning', target_yaw, current_yaw_angle, current_pitch_angle, '', error_x, error_y, yaw_speed, pitch_speed]
                     log_data.append(log_row)
+                    # ----------------------------------------------------
 
                     if abs(error_x) < FINE_AIM_TOLERANCE_X and abs(error_y) < FINE_AIM_TOLERANCE_Y:
-                        print(f"\n  [Fine] Target locked!")
-                        ep_gimbal.drive_speed(yaw_speed=0, pitch_speed=0)
-                        time.sleep(0.5) # รอให้ gimbal นิ่งสนิท
-
-                        # =========================================================
-                        # === แก้ไขตรงนี้: เปลี่ยนเป็นกระสุนจริง (Gel Beads) ===
-                        # ⚠️ คำเตือน: ตรวจสอบให้แน่ใจว่าอยู่ในพื้นที่ปลอดภัย!
-                        ep_blaster.fire(fire_type='ir',times=1)
-                        # =========================================================
-
-                        print("FIRE!")
-                        time.sleep(1) # รอหลังยิงเพื่อให้หุ่นยนต์นิ่ง
+                        target_locked = True
                         break
-
-                    ep_gimbal.drive_speed(yaw_speed=yaw_speed_vision, pitch_speed=pitch_speed_vision)
                 else:
-                    print("  [Fine] Marker not found. Holding position...", end='\r')
                     ep_gimbal.drive_speed(yaw_speed=0, pitch_speed=0)
-                    log_row = [timestamp, 'searching', target_angle, current_yaw_angle, '', '', '', '', '', '']
+                    
+                    # --- ★ ส่วนที่ 2: บันทึกข้อมูลของแต่ละรอบลง List ---
+                    log_row = [timestamp, 'searching', target_yaw, current_yaw_angle, current_pitch_angle, '', '', '', '', '']
                     log_data.append(log_row)
+                    # ----------------------------------------------------
+                
+                time.sleep(0.02)
 
-                time.sleep(0.033)  # Match ~30 FPS
-
-            else: # กรณีหมดเวลาใน while loop
-                print("\n  [Fine] Could not lock target in time.")
+            # === Stage 3: Firing (ยิง) ===
+            if target_locked:
+                print("  [Fine] Target locked! FIRING!")
+                ep_blaster.fire(fire_type='ir', times=1)
+                time.sleep(1)
+            else:
+                print("  [Fine] Could not lock target in time.")
 
     finally:
-        print("\n--- Mission Completed, Cleaning up ---")
-
-        # Save CSV
-        log_filename = "gimbal_log_gel_fire.csv"
-        print(f"Saving log data to {log_filename}...")
-        with open(log_filename, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow(log_header)
-            writer.writerows(log_data)
-        print("Log data saved.")
-
-        # Clean up
+        print("\n--- Mission End, Cleaning up ---")
         stop_event.set()
-        if cam_thread.is_alive():
-            cam_thread.join()
+        cam_thread.join()
         cv2.destroyAllWindows()
         ep_gimbal.drive_speed(yaw_speed=0, pitch_speed=0)
         ep_gimbal.unsub_angle()
         ep_vision.unsub_detect_info(name="marker")
         ep_camera.stop_video_stream()
+        
+        # --- ★ ส่วนที่ 3: บันทึกข้อมูลจาก List ลงเป็นไฟล์ CSV ---
+        log_filename = "gimbal_mission_log.csv"
+        print(f"Saving log data to {log_filename}...")
+        with open(log_filename, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(log_header)  # เขียนหัวตาราง
+            writer.writerows(log_data)   # เขียนข้อมูลทั้งหมด
+        print("Log data saved.")
+        # ----------------------------------------------------
+
         ep_robot.close()
-        print("Cleanup complete. Program terminated.")
+        print("Cleanup complete.")
