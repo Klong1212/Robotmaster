@@ -217,34 +217,31 @@ class MazeExplorer:
                 return self.internal_map.get_path(self.current_position, pos)
         return None
 
-    def move_forward_pid(self, distance_m, speed_limit=0.4):
+    def move_forward_pid(self, distance_m, speed_limit=2.5):
         # (ฟังก์ชันนี้ไม่มีการเปลี่ยนแปลง)
         print(f"   PID Move: Moving forward {distance_m}m.")
-        pid = PIDController(Kp=2.5, Ki=0.2, Kd=0.8, setpoint=distance_m, output_limits=(-speed_limit, speed_limit))
+        pid = PIDController(Kp=2.5, Ki=0.1, Kd=0.8, setpoint=distance_m, output_limits=(-speed_limit, speed_limit))
         start_x, start_y, _, _, _, _ = self.pose_handler.get_pose()
         while True:
             curr_x, curr_y, _, _, _, _ = self.pose_handler.get_pose()
             dist_traveled = math.hypot(curr_x - start_x, curr_y - start_y)
-            if abs(distance_m - dist_traveled) < 0.001: break
+            if abs(distance_m - dist_traveled) < 0.01: break
             vx_speed = pid.update(dist_traveled)
             self.ep_chassis.drive_speed(x=vx_speed, y=0, z=0, timeout=0.1)
             time.sleep(0.01)
-            if self.tof_handler.get_distance() < 300:
-                print("เข้าแล้ว")
-                self.ep_chassis.drive_speed(0, 0, 0)
-                break
         self.ep_chassis.drive_speed(0, 0, 0)
         print("   PID Move: Completed.")
 
 
-    def turn_pid(self, target_angle, speed_limit=60):
+    def turn_pid(self, target_angle, speed_limit=180):
         # (ฟังก์ชันนี้ไม่มีการเปลี่ยนแปลง)
         print(f"   PID Turn: Turning to {target_angle} degrees.")
-        pid = PIDController(Kp=1.8, Ki=0.2, Kd=0.8, setpoint=0, output_limits=(-speed_limit, speed_limit))
+        pid = PIDController(Kp=1.8, Ki=0.1, Kd=0.8, setpoint=0, output_limits=(-speed_limit, speed_limit))
         while True:
+            
             _, _, _, current_yaw, _, _ = self.pose_handler.get_pose()
             error = target_angle - current_yaw
-            
+            print(current_yaw)
             if error > 180: error -= 360
             if error < -180: error += 360
             if abs(error) < 0.5: break
@@ -254,13 +251,54 @@ class MazeExplorer:
         self.ep_gimbal.recenter().wait_for_completed()
         self.ep_chassis.drive_speed(0, 0, 0)
         print("   PID Turn: Completed.")
+    def recenter_robot(self, wall_distances):
+        print("   -> Recenter using ToF data...")
+        x_offset_mm = 0
+        y_offset_mm = 0
+        
+        # คำนวณค่า offset แกน X (East-West)
+        if '1' in wall_distances and '3' in wall_distances: # 1:East, 3:West
+            dist_e = wall_distances['1']
+            dist_w = wall_distances['3']
+            # ค่าผิดพลาดคือครึ่งหนึ่งของผลต่างระยะทาง
+            error_mm = (dist_w - dist_e) / 2.0
+            # ต้องเคลื่อนที่ไปในทิศทางของแกน Y ของหุ่นยนต์ เพื่อแก้แกน X ของโลก
+            # (เมื่อหุ่นยนต์หันหน้าทิศเหนือ (0 deg))
+            if self.current_orientation == 0:
+                y_offset_mm = error_mm
+            elif self.current_orientation == 2:
+                y_offset_mm = -error_mm
+            print(f"      X-Axis Correction: Move by {y_offset_mm:.1f} mm")
 
+        # คำนวณค่า offset แกน Y (North-South)
+        if '0' in wall_distances and '2' in wall_distances: # 0:North, 2:South
+            dist_n = wall_distances['0']
+            dist_s = wall_distances['2']
+            error_mm = (dist_s - dist_n) / 2.0
+            # ต้องเคลื่อนที่ไปในทิศทางของแกน X ของหุ่นยนต์ เพื่อแก้แกน Y ของโลก
+            # (เมื่อหุ่นยนต์หันหน้าทิศเหนือ (0 deg))
+            if self.current_orientation == 0:
+                x_offset_mm = error_mm
+            elif self.current_orientation == 2:
+                x_offset_mm = -error_mm
+            print(f"      Y-Axis Correction: Move by {x_offset_mm:.1f} mm")
+
+        # ถ้ามีค่า offset ที่ต้องแก้ไข ให้เคลื่อนที่เล็กน้อย
+        # แปลงจาก mm เป็น m
+        x_move_m = x_offset_mm / 1000.0
+        y_move_m = y_offset_mm / 1000.0
+        
+        if abs(x_move_m) > 0.005 or abs(y_move_m) > 0.005:
+            print(f"   Applying offset movement: x={x_move_m:.3f}m, y={y_move_m:.3f}m")
+            self.ep_chassis.move(x=x_move_m, y=y_move_m, z=0, xy_speed=0.2).wait_for_completed()
+            time.sleep(0.5)
+        else:
+            print("   Robot is well-centered. No adjustment needed.")
     def execute_path(self, path):
         # (ฟังก์ชันนี้ไม่มีการเปลี่ยนแปลง)
         if not path or len(path) < 2: return
         print(f"Executing path with PID: {path}")
         self.ep_led.set_led(r=0, g=0, b=255)
-        self.turn_pid
         for i in range(len(path) - 1):
             start_node, end_node = path[i], path[i+1]
             dx, dy = end_node[0] - start_node[0], end_node[1] - start_node[1]
@@ -286,7 +324,88 @@ class MazeExplorer:
             self.pose_handler.set_xy(end_node[0] * GRID_SIZE_M, end_node[1] * GRID_SIZE_M)
             self.pose_handler.set_yaw(target_angle)
             time.sleep(0.2)
+    # เพิ่มฟังก์ชันนี้เข้าไปในคลาส MazeExplorer
+    def correct_orientation_with_wall(self, wall_distances):
+        """
+        ปรับมุมของหุ่นยนต์ให้ตั้งฉากกับกำแพงด้านหน้าโดยใช้ ToF sensor
+        """
+        # ทิศทางด้านหน้าของหุ่นยนต์ ณ ปัจจุบัน (0:N, 1:E, 2:S, 3:W)
+        front_direction = self.current_orientation
+        
+        # ตรวจสอบว่ามีกำแพงอยู่ด้านหน้าหรือไม่ ถ้าไม่มีก็ไม่ต้องทำอะไร
+        if str(front_direction) not in wall_distances or wall_distances[str(front_direction)] >= WALL_THRESHOLD_MM:
+            print("   -> Orientation Correction: No wall in front to calibrate with.")
+            return
 
+        print("   -> Correcting orientation using front wall...")
+        self.ep_led.set_led(r=139, g=0, b=255, effect="breathing") # สีม่วงเพื่อบ่งบอกว่ากำลังปรับมุม
+
+        # พารามิเตอร์การกวาด
+        SWEEP_ANGLE_DEG = 5  # กวาด +/- 5 องศาจากตำแหน่งปัจจุบัน
+        SWEEP_SPEED_DPS = 20 # ความเร็วในการกวาด (องศาต่อวินาที)
+
+        min_dist_mm = float('inf')
+        angle_at_min_dist = 0
+        
+        # เริ่มกวาดจากซ้ายไปขวา
+        self.ep_gimbal.moveto(yaw=-SWEEP_ANGLE_DEG, pitch=0, yaw_speed=SWEEP_SPEED_DPS).wait_for_completed()
+        time.sleep(0.5)
+        
+        # เริ่มการกวาดจริง
+        self.ep_gimbal.moveto(yaw=SWEEP_ANGLE_DEG, pitch=0, yaw_speed=SWEEP_SPEED_DPS).wait_for_start()
+
+        start_time = time.time()
+        while time.time() - start_time < (2 * SWEEP_ANGLE_DEG / SWEEP_SPEED_DPS) + 0.5:
+            try:
+                # อ่านค่ามุมของ gimbal และระยะทางจาก ToF
+                gimbal_yaw, _ = self.ep_gimbal.get_attitude(mode="relative_to_chassis")
+                current_dist = self.tof_handler.get_distance()
+                
+                if current_dist < min_dist_mm:
+                    min_dist_mm = current_dist
+                    angle_at_min_dist = gimbal_yaw # มุมที่ให้ระยะทางสั้นที่สุด
+                
+                time.sleep(0.01)
+            except Exception as e:
+                # อาจเกิดข้อผิดพลาดระหว่าง gimbal กำลังเคลื่อนที่
+                pass
+
+        self.ep_gimbal.recenter().wait_for_completed()
+        
+        # มุมที่ผิดพลาดคือมุมที่ gimbal ต้องหันไปเพื่อให้ตั้งฉาก
+        error_angle = angle_at_min_dist
+        print(f"      - Min distance {min_dist_mm}mm found at gimbal angle {error_angle:.2f}°")
+        
+        # ถ้าค่าผิดพลาดน้อยมาก ก็ไม่ต้องแก้ไข
+        if abs(error_angle) < 0.5:
+            print("      - Orientation is acceptable. No correction needed.")
+            self.ep_led.set_led(r=0, g=0, b=255) # กลับไปสีน้ำเงินปกติ
+            return
+            
+        # คำนวณมุมเป้าหมายใหม่ของ Chassis
+        _, _, _, current_chassis_yaw, _, _ = self.pose_handler.get_pose()
+        correction_angle = current_chassis_yaw + error_angle
+        
+        # ทำให้มุมอยู่ในช่วง -180 ถึง 180
+        if correction_angle > 180: correction_angle -= 360
+        if correction_angle < -180: correction_angle += 360
+
+        print(f"      - Chassis yaw error is {error_angle:.2f}°. Correcting...")
+        
+        # ใช้ PID turn เพื่อหมุนแก้ไข
+        self.turn_pid(correction_angle)
+
+        # *** ขั้นตอนสำคัญ: รีเซ็ตค่า Yaw ใหม่หลังจากแก้ไขแล้ว ***
+        # เราต้องบอกหุ่นยนต์ว่า "ตอนนี้แหละคือมุมที่ถูกต้อง"
+        # เช่น ถ้าก่อนหน้านี้หุ่นยนต์หันไปทิศเหนือ (0) เราก็จะรีเซ็ตค่า yaw เป็น 0
+        target_yaw = 0
+        if self.current_orientation == 1: target_yaw = 90
+        elif self.current_orientation == 2: target_yaw = 180
+        elif self.current_orientation == 3: target_yaw = -90
+        
+        self.pose_handler.set_yaw(target_yaw)
+        print(f"      - Orientation corrected. Yaw reset to {target_yaw}°.")
+        self.ep_led.set_led(r=0, g=0, b=255) # กลับไปสีน้ำเงินปกติ
     # <--- แก้ไข: ปรับปรุงลำดับการทำงานใน `run_mission` ---
     def run_mission(self):
         start_time = time.time()
@@ -304,11 +423,12 @@ class MazeExplorer:
                 previous_pos = self.visited_path[-2] if len(self.visited_path) > 1 else None
                 
                 # Step 1: สแกนและรับค่าระยะทางกลับมา
-                self.scan_surroundings_with_gimbal(previous_position=previous_pos)
+                wall_distances=self.scan_surroundings_with_gimbal(previous_position=previous_pos)
                 
                 # Step 2: จัดตำแหน่งกลางโดยใช้ข้อมูลจากการสแกน
             
-                
+                self.recenter_robot(wall_distances)
+                self.correct_orientation_with_wall(wall_distances)
             else:
                 print(f"\nPosition {self.current_position} already explored. Skipping scan.")
             # Step 3: ตัดสินใจเลือกเส้นทางต่อไป
@@ -370,7 +490,7 @@ if __name__ == '__main__':
         tof_handler = TofDataHandler()
         vision_handler = VisionDataHandler()
         pose_handler = PoseDataHandler()
-
+        ep_robot.reset_robot_mode()
         ep_robot.sensor.sub_distance(freq=10, callback=tof_handler.update)
         ep_robot.vision.sub_detect_info(name="marker", callback=vision_handler.update)
         ep_robot.chassis.sub_position(freq=20, callback=pose_handler.update_position)
