@@ -14,8 +14,8 @@ import matplotlib.pyplot as plt
 # ==============================================================================
 GRID_SIZE_M = 0.6
 WALL_THRESHOLD_MM = 500
-VISION_SCAN_DURATION_S = 1.0
-GIMBAL_TURN_SPEED = 180
+VISION_SCAN_DURATION_S = 0.5
+GIMBAL_TURN_SPEED = 200
 
 ORIENTATIONS = {0: "North", 1: "East", 2: "South", 3: "West"}
 WALL_NAMES = {0: "North Wall", 1: "East Wall", 2: "South Wall", 3: "Westก Wall"}
@@ -220,16 +220,17 @@ class MazeExplorer:
     def move_forward_pid(self, distance_m, speed_limit=0.4):
         # (ฟังก์ชันนี้ไม่มีการเปลี่ยนแปลง)
         print(f"   PID Move: Moving forward {distance_m}m.")
-        pid = PIDController(Kp=2.5, Ki=0.1, Kd=0.8, setpoint=distance_m, output_limits=(-speed_limit, speed_limit))
+        pid = PIDController(Kp=2.5, Ki=0.2, Kd=0.8, setpoint=distance_m, output_limits=(-speed_limit, speed_limit))
         start_x, start_y, _, _, _, _ = self.pose_handler.get_pose()
         while True:
             curr_x, curr_y, _, _, _, _ = self.pose_handler.get_pose()
             dist_traveled = math.hypot(curr_x - start_x, curr_y - start_y)
-            if abs(distance_m - dist_traveled) < 0.02: break
+            if abs(distance_m - dist_traveled) < 0.001: break
             vx_speed = pid.update(dist_traveled)
             self.ep_chassis.drive_speed(x=vx_speed, y=0, z=0, timeout=0.1)
             time.sleep(0.01)
-            if self.tof_handler.get_distance() < 200:
+            if self.tof_handler.get_distance() < 300:
+                print("เข้าแล้ว")
                 self.ep_chassis.drive_speed(0, 0, 0)
                 break
         self.ep_chassis.drive_speed(0, 0, 0)
@@ -239,18 +240,18 @@ class MazeExplorer:
     def turn_pid(self, target_angle, speed_limit=60):
         # (ฟังก์ชันนี้ไม่มีการเปลี่ยนแปลง)
         print(f"   PID Turn: Turning to {target_angle} degrees.")
-        pid = PIDController(Kp=1.8, Ki=0.1, Kd=0.8, setpoint=0, output_limits=(-speed_limit, speed_limit))
+        pid = PIDController(Kp=1.8, Ki=0.2, Kd=0.8, setpoint=0, output_limits=(-speed_limit, speed_limit))
         while True:
             _, _, _, current_yaw, _, _ = self.pose_handler.get_pose()
             error = target_angle - current_yaw
             
             if error > 180: error -= 360
             if error < -180: error += 360
-            if abs(error) < 1.5: break
+            if abs(error) < 0.5: break
             vz_speed = pid.update(-error)
             self.ep_chassis.drive_speed(x=0, y=0, z=vz_speed, timeout=0.1)
             time.sleep(0.01)
-
+        self.ep_gimbal.recenter().wait_for_completed()
         self.ep_chassis.drive_speed(0, 0, 0)
         print("   PID Turn: Completed.")
 
@@ -259,7 +260,7 @@ class MazeExplorer:
         if not path or len(path) < 2: return
         print(f"Executing path with PID: {path}")
         self.ep_led.set_led(r=0, g=0, b=255)
-
+        self.turn_pid
         for i in range(len(path) - 1):
             start_node, end_node = path[i], path[i+1]
             dx, dy = end_node[0] - start_node[0], end_node[1] - start_node[1]
@@ -281,6 +282,7 @@ class MazeExplorer:
             self.move_forward_pid(GRID_SIZE_M)
             self.current_position = end_node
             self.visited_path.append(self.current_position)
+
             self.pose_handler.set_xy(end_node[0] * GRID_SIZE_M, end_node[1] * GRID_SIZE_M)
             self.pose_handler.set_yaw(target_angle)
             time.sleep(0.2)
@@ -302,14 +304,13 @@ class MazeExplorer:
                 previous_pos = self.visited_path[-2] if len(self.visited_path) > 1 else None
                 
                 # Step 1: สแกนและรับค่าระยะทางกลับมา
-                wall_distances = self.scan_surroundings_with_gimbal(previous_position=previous_pos)
+                self.scan_surroundings_with_gimbal(previous_position=previous_pos)
                 
                 # Step 2: จัดตำแหน่งกลางโดยใช้ข้อมูลจากการสแกน
             
                 
             else:
                 print(f"\nPosition {self.current_position} already explored. Skipping scan.")
-            self.center_using_side_walls(wall_distances)
             # Step 3: ตัดสินใจเลือกเส้นทางต่อไป
             path_to_execute = self.decide_next_path()
 
