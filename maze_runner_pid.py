@@ -133,21 +133,25 @@ class MazeExplorer:
         self.vision_handler = vision_handler
         self.pose_handler = pose_handler
         self.current_position = (0, 0)
-        self.current_orientation = 0
+        self.current_orientation = 0 # 0:N, 1:E, 2:S, 3:W
         self.internal_map = RobotMap()
         self.marker_map = {}
         self.visited_path = [self.current_position]
         print("Robot Explorer Initialized. Starting at (0,0), facing North.")
         self.ep_led.set_led(r=0, g=0, b=255)
         self.ep_gimbal.recenter().wait_for_completed()
+        # Reset pose at the beginning
         self.pose_handler.set_xy(0.0, 0.0)
         self.pose_handler.set_yaw(0.0)
 
+    # <--- แก้ไข: ฟังก์ชันนี้จะคืนค่าระยะทางที่วัดได้ ---
     def scan_surroundings_with_gimbal(self, previous_position=None):
         print(f"\nScanning surroundings at {self.current_position} with Gimbal...")
         self.ep_led.set_led(r=255, g=255, b=0, effect="breathing")
         self.internal_map.mark_explored(self.current_position)
         x, y = self.current_position
+        
+        wall_distances = {} # <--- เพิ่ม: สร้าง dict เพื่อเก็บระยะทาง
 
         direction_to_skip = -1
         if previous_position:
@@ -157,34 +161,30 @@ class MazeExplorer:
             print(f"   -> Will skip physical scan for direction {ORIENTATIONS.get(direction_to_skip, 'N/A')}.")
 
         for scan_direction in range(4):
-            # --- [LOGIC UPGRADE] ---
-            # 1. เช็คทิศที่เพิ่งเดินมา (Priority 1)
             if scan_direction == direction_to_skip:
                 continue
 
-            # 2. คำนวณตำแหน่งของช่องข้างหน้า
             neighbor_pos = None
             if scan_direction == 0: neighbor_pos = (x, y + 1)
             elif scan_direction == 1: neighbor_pos = (x + 1, y)
             elif scan_direction == 2: neighbor_pos = (x, y - 1)
             elif scan_direction == 3: neighbor_pos = (x - 1, y)
 
-            # 3. เช็คว่าช่องข้างหน้าเคยสำรวจแล้วหรือยัง (Priority 2)
             if neighbor_pos in self.internal_map.explored:
                 print(f"   -> Neighbor {neighbor_pos} ({ORIENTATIONS[scan_direction]}) already explored. Inferring from map, skipping physical scan.")
                 continue
 
-            # 4. ถ้าเป็นพื้นที่ใหม่ที่ไม่เคยสำรวจ ให้ใช้เซ็นเซอร์สแกนตามปกติ
             print(f"   Scanning new area in direction: {ORIENTATIONS[scan_direction]}...")
             angle_to_turn_gimbal = (scan_direction - self.current_orientation) * 90
             if angle_to_turn_gimbal > 180: angle_to_turn_gimbal -= 360
             if angle_to_turn_gimbal < -180: angle_to_turn_gimbal += 360
 
             self.ep_gimbal.moveto(yaw=angle_to_turn_gimbal, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
-
             time.sleep(0.5)
             distance_mm = self.tof_handler.get_distance()
-            print(f"      - ToF distance: {distance_mm} mm")
+            print(f"         - ToF distance: {distance_mm} mm")
+            
+            wall_distances[scan_direction] = distance_mm # <--- เพิ่ม: เก็บค่าที่วัดได้
 
             if distance_mm >= WALL_THRESHOLD_MM:
                 self.internal_map.add_connection(self.current_position, neighbor_pos)
@@ -199,26 +199,73 @@ class MazeExplorer:
                     if marker_name not in self.marker_map: self.marker_map[marker_name] = []
                     if finding not in self.marker_map[marker_name]:
                         self.marker_map[marker_name].append(finding)
-                        print(f"      !!! Marker Found & Logged: '{marker_name}' at Grid {finding[0]} on the {finding[1]} !!!")
+                        print(f"         !!! Marker Found & Logged: '{marker_name}' at Grid {finding[0]} on the {finding[1]} !!!")
 
         self.ep_gimbal.recenter().wait_for_completed()
         print("Scan complete. Gimbal recentered.")
+        return wall_distances # <--- แก้ไข: คืนค่า dict
+
+    # <<< ฟังก์ชันใหม่: จัดตำแหน่งกลางโดยใช้ผนังด้านข้าง (แกน X) >>>
+    def center_using_side_walls(self, wall_distances):
+        print("--- Checking for side-wall centering opportunity ---")
+        # เช็คว่ามีข้อมูลระยะทางของทิศตะวันออก (1) และตะวันตก (3) หรือไม่
+        print(wall_distances)
+        if 1 in wall_distances or 2 in wall_distances or 3 in wall_distances or 4 in wall_distances :
+            dist_x_mm = wall_distances[1] if 1 in wall_distances else 0
+            dist_y_mm = wall_distances[2] if 2 in wall_distances else 0
+            dist_x_mm = wall_distances[3] if 3 in wall_distances and dist_x_mm ==0 else dist_x_mm
+            dist_y_mm = wall_distances[4] if 4 in wall_distances and dist_y_mm ==0  else dist_y_mm
+            dist_x_mm=float(dist_x_mm)
+            dist_y_mm=float(dist_y_mm)
+            print(dist_x_mm,dist_y_mm)
+            # เช็คว่าทั้งสองด้านเป็นกำแพงจริง
+            if dist_x_mm < WALL_THRESHOLD_MM and dist_y_mm < WALL_THRESHOLD_MM :                     
+                # คำนวณระยะที่ต้องขยับเพื่อไปอยู่กึ่งกลาง
+                # ค่าบวกคือต้องขยับไปทางทิศตะวันออก, ค่าลบคือต้องขยับไปทางทิศตะวันตก
+                
+                correction_xm = (290-dist_x_mm)/ 1000.0 if dist_x_mm > 0 else 0
+                correction_ym = (290-dist_y_mm)/ 1000.0 if dist_y_mm > 0 else 0
+                print(correction_xm,correction_xm)
+                if abs(correction_xm) < 0.02 and abs(correction_ym) < 0.02: # ถ้าค่าน้อยกว่า 2 ซม. ไม่ต้องขยับ
+                    print("   Robot is already centered. No adjustment needed.")
+                    return
+
+                # กำหนดค่า x, y ที่จะใช้ใน move_to โดยขึ้นอยู่กับทิศที่หุ่นยนต์หันหน้าอยู่
+                move_x, move_y = 0, 0
+                if self.current_orientation == 0:   # Facing North
+                    move_y = correction_ym
+                elif self.current_orientation == 1: # Facing East
+                    move_x = correction_xm
+                elif self.current_orientation == 2: # Facing South
+                    move_y = -correction_ym
+                elif self.current_orientation == 3: # Facing West
+                    move_x = -correction_xm
+                
+                print(f"   Executing chassis.move_to(x={move_x:.3f}, y={move_y:.3f})")
+                self.ep_chassis.move(x=move_x, y=move_y, z=0, xy_speed=2.5).wait_for_completed()
+                time.sleep
+                # อัปเดตตำแหน่งภายในของหุ่นยนต์หลังจากการขยับ
+                print("--- Centering adjustment complete ---")
+                correction_xm, correction_ym = 0, 0
+            else:
+                print("   No opposing side walls detected. Skipping centering.")
+        else:
+            print("   Not enough data for side-wall centering.")
 
 
     def decide_next_path(self):
+        # (ฟังก์ชันนี้ไม่มีการเปลี่ยนแปลง)
         unexplored = self.internal_map.get_unexplored_neighbors(self.current_position)
         if unexplored:
             return [self.current_position, unexplored[0]]
-
-        # Backtrack โดยหาจากเส้นทางที่เคยไปมาทั้งหมด
         for pos in reversed(self.visited_path):
-            # ตรวจสอบว่า node ที่เคยไปแล้วนั้น ยังมีทางไปต่อที่ยังไม่ได้สำรวจหรือไม่
             if self.internal_map.get_unexplored_neighbors(pos):
                 print(f"No new paths here. Backtracking to find an unexplored path from {pos}...")
                 return self.internal_map.get_path(self.current_position, pos)
         return None
 
     def move_forward_pid(self, distance_m, speed_limit=0.4):
+        # (ฟังก์ชันนี้ไม่มีการเปลี่ยนแปลง)
         print(f"   PID Move: Moving forward {distance_m}m.")
         pid = PIDController(Kp=2.5, Ki=0.1, Kd=0.8, setpoint=distance_m, output_limits=(-speed_limit, speed_limit))
         start_x, start_y, _, _, _, _ = self.pose_handler.get_pose()
@@ -227,27 +274,32 @@ class MazeExplorer:
             dist_traveled = math.hypot(curr_x - start_x, curr_y - start_y)
             if abs(distance_m - dist_traveled) < 0.02: break
             vx_speed = pid.update(dist_traveled)
-            self.ep_chassis.drive_speed(vx_speed, 0, 0, timeout=0.1)
+            self.ep_chassis.drive_speed(x=vx_speed, y=0, z=0, timeout=0.1)
             time.sleep(0.01)
         self.ep_chassis.drive_speed(0, 0, 0)
         print("   PID Move: Completed.")
 
+
     def turn_pid(self, target_angle, speed_limit=60):
+        # (ฟังก์ชันนี้ไม่มีการเปลี่ยนแปลง)
         print(f"   PID Turn: Turning to {target_angle} degrees.")
         pid = PIDController(Kp=1.8, Ki=0.1, Kd=0.8, setpoint=0, output_limits=(-speed_limit, speed_limit))
         while True:
             _, _, _, current_yaw, _, _ = self.pose_handler.get_pose()
             error = target_angle - current_yaw
+            
             if error > 180: error -= 360
             if error < -180: error += 360
             if abs(error) < 1.5: break
             vz_speed = pid.update(-error)
-            self.ep_chassis.drive_speed(0, 0, vz_speed, timeout=0.1)
+            self.ep_chassis.drive_speed(x=0, y=0, z=vz_speed, timeout=0.1)
             time.sleep(0.01)
+
         self.ep_chassis.drive_speed(0, 0, 0)
         print("   PID Turn: Completed.")
 
     def execute_path(self, path):
+        # (ฟังก์ชันนี้ไม่มีการเปลี่ยนแปลง)
         if not path or len(path) < 2: return
         print(f"Executing path with PID: {path}")
         self.ep_led.set_led(r=0, g=0, b=255)
@@ -270,20 +322,19 @@ class MazeExplorer:
             self.turn_pid(target_angle)
             self.current_orientation = target_orientation
             time.sleep(0.2)
-
             self.move_forward_pid(GRID_SIZE_M)
-
             self.current_position = end_node
             self.visited_path.append(self.current_position)
             self.pose_handler.set_xy(end_node[0] * GRID_SIZE_M, end_node[1] * GRID_SIZE_M)
             self.pose_handler.set_yaw(target_angle)
             time.sleep(0.2)
 
+    # <--- แก้ไข: ปรับปรุงลำดับการทำงานใน `run_mission` ---
     def run_mission(self):
         start_time = time.time()
         time_limit_seconds = 600
         print(f"Mission started! Time limit: {time_limit_seconds} seconds.")
-
+        self.turn_pid(target_angle=0)
         while True:
             elapsed_time = time.time() - start_time
             if elapsed_time >= time_limit_seconds:
@@ -293,10 +344,17 @@ class MazeExplorer:
 
             if self.current_position not in self.internal_map.explored:
                 previous_pos = self.visited_path[-2] if len(self.visited_path) > 1 else None
-                self.scan_surroundings_with_gimbal(previous_position=previous_pos)
+                
+                # Step 1: สแกนและรับค่าระยะทางกลับมา
+                wall_distances = self.scan_surroundings_with_gimbal(previous_position=previous_pos)
+                
+                # Step 2: จัดตำแหน่งกลางโดยใช้ข้อมูลจากการสแกน
+            
+                
             else:
                 print(f"\nPosition {self.current_position} already explored. Skipping scan.")
-
+            self.center_using_side_walls(wall_distances)
+            # Step 3: ตัดสินใจเลือกเส้นทางต่อไป
             path_to_execute = self.decide_next_path()
 
             if not path_to_execute:
@@ -304,6 +362,7 @@ class MazeExplorer:
                 self.ep_led.set_led(r=0, g=255, b=0, effect="on")
                 break
 
+            # Step 4: เดินทางตามเส้นทาง
             self.execute_path(path_to_execute)
             
         print("\n--- Final Marker Map ---")
@@ -311,7 +370,7 @@ class MazeExplorer:
             for name, findings in sorted(self.marker_map.items()):
                 print(f"   Marker '{name}':")
                 for details in findings:
-                    print(f"      - Found at Grid={details[0]}, Wall={details[1]}")
+                    print(f"         - Found at Grid={details[0]}, Wall={details[1]}")
         else:
             print("   No markers were logged.")
 
@@ -351,7 +410,6 @@ if __name__ == '__main__':
         ep_robot = robot.Robot()
         ep_robot.initialize(conn_type="ap")
         print("Robot connected.")
-
         tof_handler = TofDataHandler()
         vision_handler = VisionDataHandler()
         pose_handler = PoseDataHandler()
@@ -363,7 +421,6 @@ if __name__ == '__main__':
 
         print("Subscribed to all required sensors.")
         time.sleep(2)
-
         explorer = MazeExplorer(ep_robot, tof_handler, vision_handler, pose_handler)
         explorer.run_mission()
 

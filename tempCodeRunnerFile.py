@@ -1,2 +1,2 @@
-
-        x1, y1 = node
+ 0 else 0
+                print
