@@ -1,6 +1,8 @@
 import time
 import threading
 import math
+import csv
+from datetime import datetime
 
 import robomaster
 from robomaster import robot, vision
@@ -18,7 +20,7 @@ VISION_SCAN_DURATION_S = 0.5
 GIMBAL_TURN_SPEED = 200
 
 ORIENTATIONS = {0: "North", 1: "East", 2: "South", 3: "West"}
-WALL_NAMES = {0: "North Wall", 1: "East Wall", 2: "South Wall", 3: "Westก Wall"}
+WALL_NAMES = {0: "North Wall", 1: "East Wall", 2: "South Wall", 3: "West Wall"}  # <<< CHANGED (พิมพ์ตก)
 
 # ==============================================================================
 # คลาสจัดการข้อมูลและแผนที่ (Data Handlers & Map)
@@ -40,13 +42,18 @@ class VisionDataHandler:
         self._lock = threading.Lock()
     def update(self, vision_info):
         with self._lock:
-            self.markers = [info[0] for info in vision_info[1:]] if vision_info[0] > 0 else []
+            try:
+                self.markers = [str(t[4]) for t in vision_info] if vision_info else []
+            except Exception as e:
+                print(f"[Vision Parse Error] {e} | raw={vision_info}")
+                self.markers = []
     def get_markers(self):
         with self._lock:
             return list(self.markers)
     def clear(self):
         with self._lock:
             self.markers = []
+
 
 class PoseDataHandler:
     def __init__(self):
@@ -81,10 +88,8 @@ class RobotMap:
             self.graph[pos2].add(pos1)
             print(f"      Map: Added connection between {pos1} and {pos2}")
     def add_blocked(self, pos1, pos2):
-        # เก็บเป็นทูเพิลแบบเรียง เพื่อกันซ้ำ
         edge = tuple(sorted([pos1, pos2]))
         self.blocked.add(edge)
-
     def mark_explored(self, position):
         self.explored.add(position)
     def get_unexplored_neighbors(self, position):
@@ -143,6 +148,7 @@ class MazeExplorer:
         self.internal_map = RobotMap()
         self.marker_map = {}
         self.visited_path = [self.current_position]
+        self.step_counter = 0  # <<< ADDED: นับจำนวนช่องที่เดิน เพื่อ trig ทุกๆ 2 ช่อง
         print("Robot Explorer Initialized. Starting at (0,0), facing North.")
         self.ep_led.set_led(r=0, g=0, b=255)
         self.ep_gimbal.recenter().wait_for_completed()
@@ -150,14 +156,50 @@ class MazeExplorer:
         self.pose_handler.set_xy(0.0, 0.0)
         self.pose_handler.set_yaw(0.0)
 
-    # <--- แก้ไข: ฟังก์ชันนี้จะคืนค่าระยะทางที่วัดได้ ---
+        # --- Logs for CSV ---  # <<< ADDED
+        self.scan_log = []      # รายการสแกนกำแพงต่อกริด: {'x','y','N','E','S','W','ts'}
+        self.wall_log = set()   # เซตของกำแพงปิด (edge)
+        self.marker_log = []    # {'name','gx','gy','wall','ts'}
+        self.path_log = []      # {'step','gx','gy','yaw','ts'}
+
+    # <<< ADDED: บันทึก CSV ตอนจบภารกิจ >>>
+    def save_csv_logs(self):
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        if self.scan_log:
+            with open(f"scan_log_{ts}.csv", "w", newline='', encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=["ts","grid_x","grid_y","N_mm","E_mm","S_mm","W_mm"])
+                w.writeheader()
+                for r in self.scan_log: w.writerow(r)
+
+        if self.wall_log:
+            with open(f"walls_log_{ts}.csv", "w", newline='', encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow(["cell1_x","cell1_y","cell2_x","cell2_y"])
+                for (a,b) in sorted(self.wall_log):
+                    w.writerow([a[0],a[1],b[0],b[1]])
+
+        if self.marker_log:
+            with open(f"marker_log_{ts}.csv", "w", newline='', encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=["ts","name","grid_x","grid_y","wall"])
+                w.writeheader()
+                for r in self.marker_log: w.writerow(r)
+
+        if self.visited_path:
+            with open(f"path_log_{ts}.csv", "w", newline='', encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow(["step","grid_x","grid_y"])
+                for i, (gx,gy) in enumerate(self.visited_path):
+                    w.writerow([i,gx,gy])
+
+    # <--- แก้ไข: ฟังก์ชันนี้จะคืนค่าระยะทางที่วัดได้ --->
     def scan_surroundings_with_gimbal(self, previous_position=None):
         print(f"\nScanning surroundings at {self.current_position} with Gimbal...")
         self.ep_led.set_led(r=255, g=255, b=0, effect="breathing")
         self.internal_map.mark_explored(self.current_position)
         x, y = self.current_position
         
-        wall_distances = {} # <--- เพิ่ม: สร้าง dict เพื่อเก็บระยะทาง
+        wall_distances = {} # เก็บระยะทาง
 
         direction_to_skip = -1
         if previous_position:
@@ -185,50 +227,44 @@ class MazeExplorer:
             time.sleep(0.5)
             distance_mm = self.tof_handler.get_distance()
             print(f"         - ToF distance: {distance_mm} mm")
-            
-            wall_distances[f'{scan_direction}'] = distance_mm # <--- เพิ่ม: เก็บค่าที่วัดได้
+            wall_distances[f'{scan_direction}'] = distance_mm
 
             if distance_mm >= WALL_THRESHOLD_MM:
                 self.internal_map.add_connection(self.current_position, neighbor_pos)
-            else: # หมายความว่า distance_mm < WALL_THRESHOLD_MM ซึ่งก็คือมีกำแพงอยู่
+            else:
                 print(f"           - Wall detected at {distance_mm}mm. Preparing to scan for markers.")
-                
-                # --- กระบวนการย่อยสำหรับตรวจจับ Marker ---
-                # เป้าหมาย: ขยับเข้าไปใกล้กำแพงเพื่อสแกนได้ดีขึ้น แล้วกลับมาที่จุดศูนย์กลางของช่องเดิม
-
-                # 1. คำนวณระยะทางที่ต้องเคลื่อนที่ (หน่วยเป็นเมตร)
-                #    เป้าหมายคือให้หุ่นยนต์อยู่ห่างจากกำแพงประมาณ 23 ซม. (0.23 เมตร)
-                #    ค่าที่เป็นบวก หมายถึง เคลื่อนที่เข้าหากำแพง
-                move_dist_m = (distance_mm / 1000.0) - 0.15
-                move_dist_m_y= (distance_mm / 1000.0) - 0.2
-                # 2. คำนวณทิศทางการเคลื่อนที่เทียบกับตัวหุ่นยนต์
-                #    `relative_direction` จะเป็น 0:หน้า, 1:ขวา, 2:หลัง, 3:ซ้าย
+                # --- เตรียมเข้าใกล้เพื่อสแกน แล้วกลับ ---
+                move_dist_m = (distance_mm / 1000.0) - 0.23
+                move_dist_m_y = (distance_mm / 1000.0) - 0.23
                 relative_direction = (scan_direction - self.current_orientation + 4) % 4
                 self.internal_map.add_blocked(self.current_position, neighbor_pos)
+                self.wall_log.add(tuple(sorted([self.current_position, neighbor_pos])))  # <<< ADDED: เก็บสำหรับ CSV
 
                 move_x, move_y = 0.0, 0.0
-                if relative_direction == 0:   # กำแพงอยู่ด้านหน้า
+                if relative_direction == 0:   # หน้า
                     move_x = move_dist_m_y
-                elif relative_direction == 1:  # กำแพงอยู่ด้านขวา
-                    move_y = move_dist_m      # SDK ของ RoboMaster: แกน y+ คือไปทางซ้าย, y- คือไปทางขวา
-                elif relative_direction == 2:  # กำแพงอยู่ด้านหลัง
+                elif relative_direction == 1:  # ขวา
+                    move_y = move_dist_m      # y+ = ซ้าย, y- = ขวา (ตาม SDK)
+                elif relative_direction == 2:  # หลัง
                     move_x = -move_dist_m_y
-                elif relative_direction == 3:  # กำแพงอยู่ด้านซ้าย
+                elif relative_direction == 3:  # ซ้าย
                     move_y = -move_dist_m
-                    
 
-                if abs(move_dist_m) > 0.02: # ขยับเมื่อระยะมีนัยสำคัญ (มากกว่า 2 ซม.)
+                if abs(move_dist_m) > 0.02:
                     print(f"             Adjusting position: move x={move_x:.2f}m, y={move_y:.2f}m.")
                     self.ep_chassis.move(x=move_x, y=move_y, z=0, xy_speed=0.3).wait_for_completed()
-
                 else:
                     print("             Position is good, no adjustment needed for scan.")
 
-                # 4. สแกนหา Marker จากตำแหน่งที่ปรับแล้ว
-                self.vision_handler.clear()
-                time.sleep(VISION_SCAN_DURATION_S) # รอให้ระบบ Vision อัปเดตข้อมูล
-                detected_markers = self.vision_handler.get_markers()
-                
+                t0 = time.time()
+                detected_markers = []
+                while time.time() - t0 < max(0.8, VISION_SCAN_DURATION_S):
+                    time.sleep(0.05)
+                    dm = self.vision_handler.get_markers()
+                    if dm:
+                        detected_markers = dm
+                        break
+
                 if detected_markers:
                     print(f"             Markers detected: {detected_markers}")
                     for marker_name in detected_markers:
@@ -237,15 +273,33 @@ class MazeExplorer:
                         if marker_name not in self.marker_map: self.marker_map[marker_name] = []
                         if finding not in self.marker_map[marker_name]:
                             self.marker_map[marker_name].append(finding)
+                            self.marker_log.append({  # <<< ADDED
+                                "ts": datetime.now().isoformat(timespec="seconds"),
+                                "name": marker_name,
+                                "grid_x": self.current_position[0],
+                                "grid_y": self.current_position[1],
+                                "wall": wall_name
+                            })
                             print(f"             !!! Marker LOGGED: '{marker_name}' at Grid {finding[0]} on the {finding[1]} !!!")
-
 
         self.ep_gimbal.recenter().wait_for_completed()
         print("Scan complete. Gimbal recentered.")
-        return wall_distances # <--- แก้ไข: คืนค่า dict
+
+        # <<< ADDED: เก็บ scan_log ต่อกริด >>>
+        def pick(d, k): 
+            return d.get(k, None)
+        self.scan_log.append({
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "grid_x": x, "grid_y": y,
+            "N_mm": pick(wall_distances, '0'),
+            "E_mm": pick(wall_distances, '1'),
+            "S_mm": pick(wall_distances, '2'),
+            "W_mm": pick(wall_distances, '3')
+        })
+
+        return wall_distances
 
     def decide_next_path(self):
-        # (ฟังก์ชันนี้ไม่มีการเปลี่ยนแปลง)
         unexplored = self.internal_map.get_unexplored_neighbors(self.current_position)
         if unexplored:
             return [self.current_position, unexplored[0]]
@@ -255,8 +309,31 @@ class MazeExplorer:
                 return self.internal_map.get_path(self.current_position, pos)
         return None
 
+    # <<< ADDED: ปรับระยะจากกำแพง “ทุกๆ 2 ช่อง” >>>
+    def periodic_wall_clearance_adjust(self, target_clearance_m=0.20):
+        """
+        ใช้ ToF ด้านหน้าตาม orientation ปัจจุบัน ถ้ามีกำแพง (dist < threshold)
+        จะขยับเข้า/ออกให้เข้าใกล้ target_clearance_m
+        """
+        distance_mm = self.tof_handler.get_distance()
+        if distance_mm < WALL_THRESHOLD_MM and distance_mm > 0:
+            desired = target_clearance_m
+            delta_m_front = (distance_mm / 1000.0) - desired
+            # เคลื่อนตามแกนหน้าหลังของหุ่น (x ใน SDK)
+            move_x = 0.0
+            move_y = 0.0
+            # relative "front" = 0 เสมอ (เราเลือกจะปรับกับกำแพงด้านหน้า)
+            # ทิศปัจจุบันมีผลกับสัญญาณแกน SDK: เราใช้ move ในกรอบร่างกายหุ่นอยู่แล้ว
+            move_x = delta_m_front  # + = ขยับไปข้างหน้า
+            if abs(move_x) > 0.02:
+                print(f"   [Periodic Clearance] front wall {distance_mm:.0f}mm -> adjust x={move_x:.2f}m to keep ~{desired*100:.0f}cm")
+                self.ep_chassis.move(x=move_x, y=move_y, z=0, xy_speed=1.5).wait_for_completed()
+            else:
+                print("   [Periodic Clearance] within tolerance; no move.")
+        else:
+            print("   [Periodic Clearance] no front wall within threshold; skip.")
+
     def move_forward_pid(self, distance_m, speed_limit=0.4):
-        # (ฟังก์ชันนี้ไม่มีการเปลี่ยนแปลง)
         print(f"   PID Move: Moving forward {distance_m}m.")
         pid = PIDController(Kp=2.5, Ki=0.2, Kd=0.8, setpoint=distance_m, output_limits=(-speed_limit, speed_limit))
         start_x, start_y, _, _, _, _ = self.pose_handler.get_pose()
@@ -271,15 +348,25 @@ class MazeExplorer:
         self.ep_chassis.drive_speed(0, 0, 0)
         print("   PID Move: Completed.")
 
+        # <<< ADDED: log path step >>>
+        gx, gy = self.current_position
+        _, _, _, yaw, _, _ = self.pose_handler.get_pose()
+        self.path_log.append({
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "grid_x": gx, "grid_y": gy, "yaw": yaw
+        })
+
+        # <<< ADDED: ทุกๆ 2 ช่อง ปรับ clearance ต่อกำแพงด้านหน้า >>>
+        self.step_counter += 1
+        if (self.step_counter % 2) == 0:
+            self.periodic_wall_clearance_adjust(target_clearance_m=0.20)
 
     def turn_pid(self, target_angle, speed_limit=60):
-        # (ฟังก์ชันนี้ไม่มีการเปลี่ยนแปลง)
         print(f"   PID Turn: Turning to {target_angle} degrees.")
         pid = PIDController(Kp=1.5, Ki=0.05, Kd=0.5, setpoint=0, output_limits=(-speed_limit, speed_limit))
         while True:
             _, _, _, current_yaw, _, _ = self.pose_handler.get_pose()
             error = target_angle - current_yaw
-            
             if error > 180: error -= 360
             if error < -180: error += 360
             if abs(error) < 1.5: break
@@ -291,7 +378,6 @@ class MazeExplorer:
         print("   PID Turn: Completed.")
 
     def execute_path(self, path):
-        # (ฟังก์ชันนี้ไม่มีการเปลี่ยนแปลง)
         if not path or len(path) < 2: return
         print(f"Executing path with PID: {path}")
         self.ep_led.set_led(r=0, g=0, b=255)
@@ -322,7 +408,7 @@ class MazeExplorer:
             self.pose_handler.set_yaw(target_angle)
             time.sleep(0.2)
 
-    # <--- แก้ไข: ปรับปรุงลำดับการทำงานใน run_mission ---
+    # <--- แก้ไข: ปรับปรุงลำดับการทำงานใน run_mission --->
     def run_mission(self):
         start_time = time.time()
         time_limit_seconds = 600
@@ -337,24 +423,16 @@ class MazeExplorer:
 
             if self.current_position not in self.internal_map.explored:
                 previous_pos = self.visited_path[-2] if len(self.visited_path) > 1 else None
-                
-                # Step 1: สแกนและรับค่าระยะทางกลับมา
                 self.scan_surroundings_with_gimbal(previous_position=previous_pos)
-                
-                # Step 2: จัดตำแหน่งกลางโดยใช้ข้อมูลจากการสแกน
-            
-                
             else:
                 print(f"\nPosition {self.current_position} already explored. Skipping scan.")
-            # Step 3: ตัดสินใจเลือกเส้นทางต่อไป
-            path_to_execute = self.decide_next_path()
 
+            path_to_execute = self.decide_next_path()
             if not path_to_execute:
                 print("\n--- MISSION COMPLETE! All areas explored. ---")
                 self.ep_led.set_led(r=0, g=255, b=0, effect="on")
                 break
 
-            # Step 4: เดินทางตามเส้นทาง
             self.execute_path(path_to_execute)
             
         print("\n--- Final Marker Map ---")
@@ -367,12 +445,15 @@ class MazeExplorer:
             print("   No markers were logged.")
 
         plot_map_with_walls(
-    self.internal_map.graph,
-    self.internal_map.blocked,
-    self.visited_path,
-    self.marker_map,
-    filename="maze_map.png"
-)
+            self.internal_map.graph,
+            self.internal_map.blocked,
+            self.visited_path,
+            self.marker_map,
+            filename="maze_map.png"
+        )
+
+        # <<< ADDED: save CSVs >>>
+        self.save_csv_logs()
 
 
 def plot_map_with_walls(graph, blocked, path, marker_map, filename="maze_map.png"):
@@ -418,11 +499,23 @@ def plot_map_with_walls(graph, blocked, path, marker_map, filename="maze_map.png
         plt.scatter(px[0], py[0], s=120, color="green", marker='o', zorder=5, label='Start')
         plt.scatter(px[-1], py[-1], s=120, color="purple", marker='X', zorder=5, label='End')
 
-    # มาร์กเกอร์ (แปะชื่อผนังในช่องที่พบ)
+    # วาง Marker “บนกำแพง” ของกริดที่พบ  # <<< CHANGED
     for name, hits in (marker_map or {}).items():
         for (gx, gy), wall in hits:
-            plt.scatter([gx], [gy], s=60, marker='s', color="tab:orange", zorder=6)
-            plt.text(gx + 0.06, gy + 0.06, f"{name}@{wall}", fontsize=8, zorder=7)
+            # คำนวณตำแหน่งกลางกำแพงของกริด (gx, gy)
+            if wall == "North Wall":
+                mx, my = gx, gy + 0.5
+            elif wall == "East Wall":
+                mx, my = gx + 0.5, gy
+            elif wall == "South Wall":
+                mx, my = gx, gy - 0.5
+            elif wall == "West Wall":
+                mx, my = gx - 0.5, gy
+            else:
+                mx, my = gx, gy  # เผื่อกรณีพิเศษ
+
+            plt.scatter([mx], [my], s=60, marker='o', color="red", zorder=6)  # วางบนผนัง
+            plt.text(mx + 0.06, my + 0.06, f"{name}", fontsize=8, zorder=7)
 
     plt.gca().set_aspect('equal', adjustable='box')
     plt.grid(True, alpha=0.3)
@@ -444,7 +537,8 @@ if __name__ == '__main__':
         tof_handler = TofDataHandler()
         vision_handler = VisionDataHandler()
         pose_handler = PoseDataHandler()
-
+        ep_camera = ep_robot.camera
+        ep_camera.start_video_stream(display=False, resolution="720p")
         ep_robot.sensor.sub_distance(freq=10, callback=tof_handler.update)
         ep_robot.vision.sub_detect_info(name="marker", callback=vision_handler.update)
         ep_robot.chassis.sub_position(freq=20, callback=pose_handler.update_position)
