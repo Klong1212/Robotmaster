@@ -40,19 +40,37 @@ class VisionDataHandler:
     def __init__(self):
         self.markers = []
         self._lock = threading.Lock()
+        self._sample_logged = False  # log โครงสร้างครั้งแรกครั้งเดียว
+
     def update(self, vision_info):
         with self._lock:
             try:
-                self.markers = [str(t[4]) for t in vision_info] if vision_info else []
+                # vision_info เป็น list ของ detection tuples
+                # รูปแบบพบบ่อย: (x, y, w, h, label) หรือ (x, y, w, h, label, ... )
+                markers = []
+                if vision_info:
+                    if not self._sample_logged:
+                        print("[Vision raw] ->", vision_info)
+                        self._sample_logged = True
+                    for t in vision_info:
+                        if not isinstance(t, (list, tuple)) or len(t) < 5:
+                            continue
+                        label = t[4]
+                        # เผื่อบางเวอร์ชันส่งเป็น int id หรือ str ชื่อ
+                        markers.append(str(label))
+                self.markers = markers
             except Exception as e:
                 print(f"[Vision Parse Error] {e} | raw={vision_info}")
                 self.markers = []
+
     def get_markers(self):
         with self._lock:
             return list(self.markers)
+
     def clear(self):
         with self._lock:
             self.markers = []
+
 
 
 class PoseDataHandler:
@@ -223,7 +241,7 @@ class MazeExplorer:
             if angle_to_turn_gimbal > 180: angle_to_turn_gimbal -= 360
             if angle_to_turn_gimbal < -180: angle_to_turn_gimbal += 360
 
-            self.ep_gimbal.moveto(yaw=angle_to_turn_gimbal, pitch=-10, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
+            self.ep_gimbal.moveto(yaw=angle_to_turn_gimbal, pitch=-15, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
             time.sleep(0.5)
             distance_mm = self.tof_handler.get_distance()
             print(f"         - ToF distance: {distance_mm} mm")
@@ -255,6 +273,8 @@ class MazeExplorer:
                     self.ep_chassis.move(x=move_x, y=move_y, z=0, xy_speed=0.3).wait_for_completed()
                 else:
                     print("             Position is good, no adjustment needed for scan.")
+                time.sleep(0.2)
+
 
                 t0 = time.time()
                 detected_markers = []
@@ -536,13 +556,15 @@ if __name__ == '__main__':
         print("Robot connected.")
         tof_handler = TofDataHandler()
         vision_handler = VisionDataHandler()
+        ep_vision = ep_robot.vision
+
         pose_handler = PoseDataHandler()
         ep_camera = ep_robot.camera
         ep_camera.start_video_stream(display=False, resolution="720p")
         ep_robot.sensor.sub_distance(freq=10, callback=tof_handler.update)
-        ep_robot.vision.sub_detect_info(name="marker", callback=vision_handler.update)
         ep_robot.chassis.sub_position(freq=20, callback=pose_handler.update_position)
         ep_robot.chassis.sub_attitude(freq=20, callback=pose_handler.update_attitude)
+        ep_robot.vision.sub_detect_info(name="marker", callback=vision_handler.update)
 
         print("Subscribed to all required sensors.")
         time.sleep(2)
