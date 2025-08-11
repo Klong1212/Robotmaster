@@ -73,6 +73,8 @@ class CSVLogger:
     def __init__(self, path="run_log.csv"):
         self.path = path
         self._ensure_header()
+        self.log.log(self.pose.get(), dist, [f"{m}:{WALLS.get(d,'?')}"])
+
     def _ensure_header(self):
         new = not os.path.exists(self.path)
         if new:
@@ -214,22 +216,24 @@ class MazeExplorer:
 
     def turn_pid(self, target_angle, speed_limit=120):
         pid = PID(Kp=1.2, Ki=0.05, Kd=0.5, setpoint=0, limits=(-speed_limit, speed_limit))
-        deadband = 1.0  # องศา
+        deadband = 1.0
         last_sign = 0
         while True:
-            _,_,_,yaw,_,_ = PoseDataHandler.self.pose_handler.get_pose()
+            _,_,_,yaw,_,_ = self.pose.get()
             err = target_angle - yaw
             if err > 180: err -= 360
             if err < -180: err += 360
-            if abs(err) < deadband: break
-            sign = 1 if err>0 else -1
+            if abs(err) < deadband:
+                break
+            sign = 1 if err > 0 else -1
             if sign != last_sign:
-                pid._integral = 0.0  # ป้องกันลมค้าง
+                pid.i = 0.0       # anti-windup
                 last_sign = sign
-            wz = pid.update(-err)
-            self.ep_chassis.drive_speed(0,0,z=wz,timeout=0.1)
+            wz = pid.update(err)  # ใช้ err ตรง ๆ
+            self.ch.drive_speed(x=0, y=0, z=wz, timeout=0.1)
             time.sleep(0.01)
-        self.ep_chassis.drive_speed(0,0,0)
+        self.ch.drive_speed(0,0,0)
+
 
 
     def _hard_stop(self, r=0,g=0,b=255):
