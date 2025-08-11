@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 # การตั้งค่าและค่าคงที่ (Constants)
 # ==============================================================================
 GRID_SIZE_M = 0.6
-WALL_THRESHOLD_MM = 1000
+WALL_THRESHOLD_MM = 600
 VISION_SCAN_DURATION_S = 0.5
 GIMBAL_TURN_SPEED = 200
 
@@ -72,6 +72,7 @@ class RobotMap:
     def __init__(self):
         self.graph = {}
         self.explored = set()
+        self.blocked = set()
     def add_connection(self, pos1, pos2):
         if pos1 not in self.graph: self.graph[pos1] = set()
         if pos2 not in self.graph: self.graph[pos2] = set()
@@ -79,6 +80,11 @@ class RobotMap:
             self.graph[pos1].add(pos2)
             self.graph[pos2].add(pos1)
             print(f"      Map: Added connection between {pos1} and {pos2}")
+    def add_blocked(self, pos1, pos2):
+        # เก็บเป็นทูเพิลแบบเรียง เพื่อกันซ้ำ
+        edge = tuple(sorted([pos1, pos2]))
+        self.blocked.add(edge)
+
     def mark_explored(self, position):
         self.explored.add(position)
     def get_unexplored_neighbors(self, position):
@@ -198,6 +204,7 @@ class MazeExplorer:
                 # 2. คำนวณทิศทางการเคลื่อนที่เทียบกับตัวหุ่นยนต์
                 #    `relative_direction` จะเป็น 0:หน้า, 1:ขวา, 2:หลัง, 3:ซ้าย
                 relative_direction = (scan_direction - self.current_orientation + 4) % 4
+                self.internal_map.add_blocked(self.current_position, neighbor_pos)
 
                 move_x, move_y = 0.0, 0.0
                 if relative_direction == 0:   # กำแพงอยู่ด้านหน้า
@@ -268,7 +275,7 @@ class MazeExplorer:
     def turn_pid(self, target_angle, speed_limit=60):
         # (ฟังก์ชันนี้ไม่มีการเปลี่ยนแปลง)
         print(f"   PID Turn: Turning to {target_angle} degrees.")
-        pid = PIDController(Kp=1.5, Ki=0.1, Kd=0.8, setpoint=0, output_limits=(-speed_limit, speed_limit))
+        pid = PIDController(Kp=1.5, Ki=0.05, Kd=0.5, setpoint=0, output_limits=(-speed_limit, speed_limit))
         while True:
             _, _, _, current_yaw, _, _ = self.pose_handler.get_pose()
             error = target_angle - current_yaw
@@ -359,32 +366,71 @@ class MazeExplorer:
         else:
             print("   No markers were logged.")
 
-        plot_map_and_path(self.internal_map.graph, self.visited_path)
+        plot_map_with_walls(
+    self.internal_map.graph,
+    self.internal_map.blocked,
+    self.visited_path,
+    self.marker_map,
+    filename="maze_map.png"
+)
 
-def plot_map_and_path(graph, visited_path, filename='maze_map_pid.png'):
+
+def plot_map_with_walls(graph, blocked, path, marker_map, filename="maze_map.png"):
+    import matplotlib.pyplot as plt
+
     plt.figure(figsize=(8, 8))
-    plt.title('Robot Map & Traversed Path (PID)')
-    for node, neighbors in graph.items():
-        x1, y1 = node
-        for nb in neighbors:
-            x2, y2 = nb
-            plt.plot([x1, x2], [y1, y2], color='lightblue', zorder=1)
-    if not graph:
-        print("Plotting skipped: Map is empty.")
-    else:
-        xs, ys = [n[0] for n in graph.keys()], [n[1] for n in graph.keys()]
-        plt.scatter(xs, ys, s=50, color='blue', zorder=2, label='Map Nodes')
-    if visited_path:
-        px, py = [p[0] for p in visited_path], [p[1] for p in visited_path]
-        plt.plot(px, py, color='red', linewidth=2, zorder=3, label='Robot Path')
-        plt.scatter(px[0], py[0], s=150, color='green', marker='o', zorder=4, label='Start')
-        plt.scatter(px[-1], py[-1], s=150, color='purple', marker='X', zorder=4, label='End')
+    plt.title("Robot Map with Walls and Path")
+
+    # วาด “ทางเปิด” จาก graph (เส้นบาง)
+    drawn = set()
+    for a, nbs in graph.items():
+        for b in nbs:
+            edge = tuple(sorted([a, b]))
+            if edge in drawn: 
+                continue
+            drawn.add(edge)
+            x1, y1 = a
+            x2, y2 = b
+            plt.plot([x1, x2], [y1, y2], linewidth=1.2, alpha=0.5, zorder=1)
+
+    # วาด “กำแพงปิด” จาก blocked (เส้นหนา)
+    for edge in blocked:
+        (x1, y1), (x2, y2) = edge
+        dx, dy = x2 - x1, y2 - y1
+        if dx == 0 and abs(dy) == 1:
+            # เซลล์เดียวกันคอลัมน์ (เหนือ-ใต้) -> กำแพงแนวนอนที่กึ่งกลาง
+            y_mid = (y1 + y2) / 2.0
+            plt.plot([x1 - 0.5, x1 + 0.5], [y_mid, y_mid], linewidth=3.0, color="k", zorder=3)
+        elif dy == 0 and abs(dx) == 1:
+            # เซลล์เดียวกันแถว (ซ้าย-ขวา) -> กำแพงแนวตั้งที่กึ่งกลาง
+            x_mid = (x1 + x2) / 2.0
+            plt.plot([x_mid, x_mid], [y1 - 0.5, y1 + 0.5], linewidth=3.0, color="k", zorder=3)
+
+    # โหนด
+    if graph:
+        xs, ys = zip(*graph.keys())
+        plt.scatter(xs, ys, s=36, color="tab:blue", zorder=2, label="Nodes")
+
+    # เส้นทางที่เดิน
+    if path:
+        px, py = zip(*path)
+        plt.plot(px, py, linewidth=2, color="tab:red", zorder=4, label="Path")
+        plt.scatter(px[0], py[0], s=120, color="green", marker='o', zorder=5, label='Start')
+        plt.scatter(px[-1], py[-1], s=120, color="purple", marker='X', zorder=5, label='End')
+
+    # มาร์กเกอร์ (แปะชื่อผนังในช่องที่พบ)
+    for name, hits in (marker_map or {}).items():
+        for (gx, gy), wall in hits:
+            plt.scatter([gx], [gy], s=60, marker='s', color="tab:orange", zorder=6)
+            plt.text(gx + 0.06, gy + 0.06, f"{name}@{wall}", fontsize=8, zorder=7)
+
     plt.gca().set_aspect('equal', adjustable='box')
-    plt.grid(True)
-    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.legend(loc='best')
     plt.savefig(filename, dpi=150)
     print(f"Map saved to '{filename}'")
     plt.close()
+
 
 # ==============================================================================
 # ส่วนหลักของโปรแกรม (Main Execution)
