@@ -67,10 +67,6 @@ class VisionDataHandler:
         with self._lock:
             return list(self.markers)
 
-    def clear(self):
-        with self._lock:
-            self.markers = []
-
 
 
 class PoseDataHandler:
@@ -167,9 +163,8 @@ class MazeExplorer:
         self.marker_map = {}
         self.visited_path = [self.current_position]
         self.step_counter = 0  # <<< ADDED: นับจำนวนช่องที่เดิน เพื่อ trig ทุกๆ 2 ช่อง
-        print("Robot Explorer Initialized. Starting at (0,0), facing North.")
         self.ep_led.set_led(r=0, g=0, b=255)
-        self.ep_gimbal.recenter().wait_for_completed()
+        
         # Reset pose at the beginning
         self.pose_handler.set_xy(0.0, 0.0)
         self.pose_handler.set_yaw(0.0)
@@ -242,6 +237,7 @@ class MazeExplorer:
             if angle_to_turn_gimbal < -180: angle_to_turn_gimbal += 360
 
             self.ep_gimbal.moveto(yaw=angle_to_turn_gimbal, pitch=-15, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
+
             time.sleep(0.5)
             distance_mm = self.tof_handler.get_distance()
             print(f"         - ToF distance: {distance_mm} mm")
@@ -252,8 +248,8 @@ class MazeExplorer:
             else:
                 print(f"           - Wall detected at {distance_mm}mm. Preparing to scan for markers.")
                 # --- เตรียมเข้าใกล้เพื่อสแกน แล้วกลับ ---
-                move_dist_m = (distance_mm / 1000.0) - 0.23
-                move_dist_m_y = (distance_mm / 1000.0) - 0.23
+                move_dist_m = (distance_mm / 1000.0) - 0.20
+                move_dist_m_y = (distance_mm / 1000.0) - 0.20
                 relative_direction = (scan_direction - self.current_orientation + 4) % 4
                 self.internal_map.add_blocked(self.current_position, neighbor_pos)
                 self.wall_log.add(tuple(sorted([self.current_position, neighbor_pos])))  # <<< ADDED: เก็บสำหรับ CSV
@@ -275,7 +271,7 @@ class MazeExplorer:
                     print("             Position is good, no adjustment needed for scan.")
                 time.sleep(0.2)
 
-
+                self.ep_chassis.drive_speed(x=0, y=0, z=0, timeout=0.1)
                 t0 = time.time()
                 detected_markers = []
                 while time.time() - t0 < max(0.8, VISION_SCAN_DURATION_S):
@@ -285,7 +281,7 @@ class MazeExplorer:
                         detected_markers = dm
                         break
 
-                if detected_markers:
+                if detected_markers and distance_mm < 0.3:
                     print(f"             Markers detected: {detected_markers}")
                     for marker_name in detected_markers:
                         wall_name = WALL_NAMES.get(scan_direction, "Unknown Wall")
@@ -401,7 +397,6 @@ class MazeExplorer:
         if not path or len(path) < 2: return
         print(f"Executing path with PID: {path}")
         self.ep_led.set_led(r=0, g=0, b=255)
-        self.turn_pid
         for i in range(len(path) - 1):
             start_node, end_node = path[i], path[i+1]
             dx, dy = end_node[0] - start_node[0], end_node[1] - start_node[1]
@@ -433,7 +428,7 @@ class MazeExplorer:
         start_time = time.time()
         time_limit_seconds = 600
         print(f"Mission started! Time limit: {time_limit_seconds} seconds.")
-        self.ep_gimbal.recenter()
+        self.ep_gimbal.recenter().wait_for_completed()
         while True:
             elapsed_time = time.time() - start_time
             if elapsed_time >= time_limit_seconds:
@@ -559,11 +554,9 @@ if __name__ == '__main__':
         ep_vision = ep_robot.vision
 
         pose_handler = PoseDataHandler()
-        ep_camera = ep_robot.camera
-        ep_camera.start_video_stream(display=False, resolution="720p")
         ep_robot.sensor.sub_distance(freq=10, callback=tof_handler.update)
-        ep_robot.chassis.sub_position(freq=20, callback=pose_handler.update_position)
-        ep_robot.chassis.sub_attitude(freq=20, callback=pose_handler.update_attitude)
+        ep_robot.chassis.sub_position(freq=10, callback=pose_handler.update_position)
+        ep_robot.chassis.sub_attitude(freq=10, callback=pose_handler.update_attitude)
         ep_robot.vision.sub_detect_info(name="marker", callback=vision_handler.update)
 
         print("Subscribed to all required sensors.")
