@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 # การตั้งค่าและค่าคงที่ (Constants)
 # ==============================================================================
 GRID_SIZE_M = 0.6
-WALL_THRESHOLD_MM = 500
+WALL_THRESHOLD_MM = 1000
 VISION_SCAN_DURATION_S = 0.5
 GIMBAL_TURN_SPEED = 200
 
@@ -170,16 +170,12 @@ class MazeExplorer:
             elif scan_direction == 2: neighbor_pos = (x, y - 1)
             elif scan_direction == 3: neighbor_pos = (x - 1, y)
 
-            if neighbor_pos in self.internal_map.explored:
-                print(f"   -> Neighbor {neighbor_pos} ({ORIENTATIONS[scan_direction]}) already explored. Inferring from map, skipping physical scan.")
-                continue
-
             print(f"   Scanning new area in direction: {ORIENTATIONS[scan_direction]}...")
             angle_to_turn_gimbal = (scan_direction - self.current_orientation) * 90
             if angle_to_turn_gimbal > 180: angle_to_turn_gimbal -= 360
             if angle_to_turn_gimbal < -180: angle_to_turn_gimbal += 360
 
-            self.ep_gimbal.moveto(yaw=angle_to_turn_gimbal, pitch=-15, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
+            self.ep_gimbal.moveto(yaw=angle_to_turn_gimbal, pitch=-10, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
             time.sleep(0.5)
             distance_mm = self.tof_handler.get_distance()
             print(f"         - ToF distance: {distance_mm} mm")
@@ -197,28 +193,27 @@ class MazeExplorer:
                 # 1. คำนวณระยะทางที่ต้องเคลื่อนที่ (หน่วยเป็นเมตร)
                 #    เป้าหมายคือให้หุ่นยนต์อยู่ห่างจากกำแพงประมาณ 23 ซม. (0.23 เมตร)
                 #    ค่าที่เป็นบวก หมายถึง เคลื่อนที่เข้าหากำแพง
-                move_dist_m = (distance_mm / 1000.0) - 0.23
-                
+                move_dist_m = (distance_mm / 1000.0) - 0.15
+                move_dist_m_y= (distance_mm / 1000.0) - 0.2
                 # 2. คำนวณทิศทางการเคลื่อนที่เทียบกับตัวหุ่นยนต์
                 #    `relative_direction` จะเป็น 0:หน้า, 1:ขวา, 2:หลัง, 3:ซ้าย
                 relative_direction = (scan_direction - self.current_orientation + 4) % 4
 
                 move_x, move_y = 0.0, 0.0
                 if relative_direction == 0:   # กำแพงอยู่ด้านหน้า
-                    move_x = move_dist_m
+                    move_x = move_dist_m_y
                 elif relative_direction == 1:  # กำแพงอยู่ด้านขวา
-                    move_y = -move_dist_m      # SDK ของ RoboMaster: แกน y+ คือไปทางซ้าย, y- คือไปทางขวา
+                    move_y = move_dist_m      # SDK ของ RoboMaster: แกน y+ คือไปทางซ้าย, y- คือไปทางขวา
                 elif relative_direction == 2:  # กำแพงอยู่ด้านหลัง
-                    move_x = -move_dist_m
+                    move_x = -move_dist_m_y
                 elif relative_direction == 3:  # กำแพงอยู่ด้านซ้าย
-                    move_y = move_dist_m
+                    move_y = -move_dist_m
                     
-                # 3. ตรวจสอบว่าจำเป็นต้องขยับตัวหรือไม่ แล้วเคลื่อนที่ชั่วคราว
-                did_move = False
+
                 if abs(move_dist_m) > 0.02: # ขยับเมื่อระยะมีนัยสำคัญ (มากกว่า 2 ซม.)
                     print(f"             Adjusting position: move x={move_x:.2f}m, y={move_y:.2f}m.")
-                    self.ep_chassis.move(x=move_x, y=move_y, z=0, xy_speed=0.3, timeout=3).wait_for_completed()
-                    did_move = True
+                    self.ep_chassis.move(x=move_x, y=move_y, z=0, xy_speed=0.3).wait_for_completed()
+
                 else:
                     print("             Position is good, no adjustment needed for scan.")
 
@@ -237,24 +232,6 @@ class MazeExplorer:
                             self.marker_map[marker_name].append(finding)
                             print(f"             !!! Marker LOGGED: '{marker_name}' at Grid {finding[0]} on the {finding[1]} !!!")
 
-                # 5. หากมีการเคลื่อนที่ ต้องเคลื่อนที่กลับมายังจุดศูนย์กลางเดิมเสมอ
-                if did_move:
-                    print(f"             Returning to grid center: move x={-move_x:.2f}m, y={-move_y:.2f}m.")
-                    self.ep_chassis.move(x=-move_x, y=-move_y, z=0, xy_speed=0.3).wait_for_completed()
-
-
-            self.vision_handler.clear()
-            time.sleep(VISION_SCAN_DURATION_S)
-            detected_markers = self.vision_handler.get_markers()
-            print(detected_markers)
-            if detected_markers and distance_mm < WALL_THRESHOLD_MM:
-                for marker_name in detected_markers:
-                    wall_name = WALL_NAMES.get(scan_direction, "Unknown")
-                    finding = (self.current_position, wall_name)
-                    if marker_name not in self.marker_map: self.marker_map[marker_name] = []
-                    if finding not in self.marker_map[marker_name]:
-                        self.marker_map[marker_name].append(finding)
-                        print(f"         !!! Marker Found & Logged: '{marker_name}' at Grid {finding[0]} on the {finding[1]} !!!")
 
         self.ep_gimbal.recenter().wait_for_completed()
         print("Scan complete. Gimbal recentered.")
@@ -279,12 +256,9 @@ class MazeExplorer:
         while True:
             curr_x, curr_y, _, _, _, _ = self.pose_handler.get_pose()
             dist_traveled = math.hypot(curr_x - start_x, curr_y - start_y)
-            if abs(distance_m - dist_traveled) < 0.001: break
+            if abs(distance_m - dist_traveled) < 0.01: break
             vx_speed = pid.update(dist_traveled)
             self.ep_chassis.drive_speed(x=vx_speed, y=0, z=0, timeout=0.1)
-            if distance_m <= 300:
-                self.ep_chassis.drive_speed(x=0, y=0, z=0, timeout=0.1)
-                break
             time.sleep(0.01)
 
         self.ep_chassis.drive_speed(0, 0, 0)
@@ -294,14 +268,14 @@ class MazeExplorer:
     def turn_pid(self, target_angle, speed_limit=60):
         # (ฟังก์ชันนี้ไม่มีการเปลี่ยนแปลง)
         print(f"   PID Turn: Turning to {target_angle} degrees.")
-        pid = PIDController(Kp=1.8, Ki=0.2, Kd=0.8, setpoint=0, output_limits=(-speed_limit, speed_limit))
+        pid = PIDController(Kp=1.5, Ki=0.1, Kd=0.8, setpoint=0, output_limits=(-speed_limit, speed_limit))
         while True:
             _, _, _, current_yaw, _, _ = self.pose_handler.get_pose()
             error = target_angle - current_yaw
             
             if error > 180: error -= 360
             if error < -180: error += 360
-            if abs(error) < 0.5: break
+            if abs(error) < 1.5: break
             vz_speed = pid.update(-error)
             self.ep_chassis.drive_speed(x=0, y=0, z=vz_speed, timeout=0.1)
             time.sleep(0.01)

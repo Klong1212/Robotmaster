@@ -1,2 +1,2 @@
 
-        explorer.run_mission(time_limit_seconds=600)
+                elif relative_direction == 2:  # กำแพงอยู่ด้านหลัง
