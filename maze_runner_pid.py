@@ -452,7 +452,7 @@ class MazeExplorer:
         start_time = time.time()
         time_limit_seconds = 600
         print(f"Mission started! Time limit: {time_limit_seconds} seconds.")
-        self.turn_pid(target_angle=0)
+        
         self.ep_gimbal.moveto(yaw=0, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
         while True:
             elapsed_time = time.time() - start_time
@@ -547,13 +547,13 @@ def plot_map_with_walls(graph, blocked, path, marker_map, filename="maze_map.png
         for (gx, gy), wall in hits:
             # คำนวณตำแหน่งกลางกำแพงของกริด (gx, gy)
             if wall == "North Wall":
-                mx, my = gx, gy + 0.5
+                mx, my = gx, gy + 0.4
             elif wall == "East Wall":
-                mx, my = gx + 0.5, gy
+                mx, my = gx + 0.4, gy
             elif wall == "South Wall":
-                mx, my = gx, gy - 0.5
+                mx, my = gx, gy - 0.4
             elif wall == "West Wall":
-                mx, my = gx - 0.5, gy
+                mx, my = gx - 0.4, gy
             else:
                 mx, my = gx, gy  # เผื่อกรณีพิเศษ
 
