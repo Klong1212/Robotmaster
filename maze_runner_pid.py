@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 GRID_SIZE_M = 0.6
 WALL_THRESHOLD_MM = 600
 VISION_SCAN_DURATION_S = 0.5
-GIMBAL_TURN_SPEED = 200
+GIMBAL_TURN_SPEED = 300
 
 ORIENTATIONS = {0: "North", 1: "East", 2: "South", 3: "West"}
 WALL_NAMES = {0: "North Wall", 1: "East Wall", 2: "South Wall", 3: "West Wall"}  # <<< CHANGED (พิมพ์ตก)
@@ -44,24 +44,22 @@ class VisionDataHandler:
 
     def update(self, vision_info):
         with self._lock:
-            try:
-                # vision_info เป็น list ของ detection tuples
-                # รูปแบบพบบ่อย: (x, y, w, h, label) หรือ (x, y, w, h, label, ... )
-                markers = []
-                if vision_info:
-                    if not self._sample_logged:
-                        print("[Vision raw] ->", vision_info)
-                        self._sample_logged = True
-                    for t in vision_info:
-                        if not isinstance(t, (list, tuple)) or len(t) < 5:
-                            continue
-                        label = t[4]
-                        # เผื่อบางเวอร์ชันส่งเป็น int id หรือ str ชื่อ
-                        markers.append(str(label))
-                self.markers = markers
-            except Exception as e:
-                print(f"[Vision Parse Error] {e} | raw={vision_info}")
-                self.markers = []
+
+            # vision_info เป็น list ของ detection tuples
+            # รูปแบบพบบ่อย: (x, y, w, h, label) หรือ (x, y, w, h, label, ... )
+            markers = []
+            if vision_info:
+                if not self._sample_logged:
+                    print("[Vision raw] ->", vision_info)
+                    self._sample_logged = True
+                for t in vision_info:
+                    if not isinstance(t, (list, tuple)) or len(t) < 5:
+                        continue
+                    label = t[4]
+                    # เผื่อบางเวอร์ชันส่งเป็น int id หรือ str ชื่อ
+                    markers.append(str(label))
+            self.markers = markers
+
 
     def get_markers(self):
         with self._lock:
@@ -298,7 +296,7 @@ class MazeExplorer:
                             })
                             print(f"             !!! Marker LOGGED: '{marker_name}' at Grid {finding[0]} on the {finding[1]} !!!")
 
-        self.ep_gimbal.recenter().wait_for_completed()
+        self.ep_gimbal.moveto(yaw=0, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
         print("Scan complete. Gimbal recentered.")
 
         # <<< ADDED: เก็บ scan_log ต่อกริด >>>
@@ -351,12 +349,12 @@ class MazeExplorer:
 
     def move_forward_pid(self, distance_m, speed_limit=0.4):
         print(f"   PID Move: Moving forward {distance_m}m.")
-        pid = PIDController(Kp=2.5, Ki=0.2, Kd=0.8, setpoint=distance_m, output_limits=(-speed_limit, speed_limit))
+        pid = PIDController(Kp=2.5, Ki=0, Kd=0.1, setpoint=distance_m, output_limits=(-speed_limit, speed_limit))
         start_x, start_y, _, _, _, _ = self.pose_handler.get_pose()
         while True:
             curr_x, curr_y, _, _, _, _ = self.pose_handler.get_pose()
             dist_traveled = math.hypot(curr_x - start_x, curr_y - start_y)
-            if abs(distance_m - dist_traveled) < 0.01: break
+            if abs(distance_m - dist_traveled) < 0.05: break
             vx_speed = pid.update(dist_traveled)
             self.ep_chassis.drive_speed(x=vx_speed, y=0, z=0, timeout=0.1)
             time.sleep(0.01)
@@ -377,7 +375,7 @@ class MazeExplorer:
         if (self.step_counter % 2) == 0:
             self.periodic_wall_clearance_adjust(target_clearance_m=0.20)
 
-    def turn_pid(self, target_angle, speed_limit=60):
+    def turn_pid(self, target_angle, speed_limit=180):
         print(f"   PID Turn: Turning to {target_angle} degrees.")
         pid = PIDController(Kp=1.5, Ki=0.05, Kd=0.5, setpoint=0, output_limits=(-speed_limit, speed_limit))
         while True:
@@ -389,7 +387,7 @@ class MazeExplorer:
             vz_speed = pid.update(-error)
             self.ep_chassis.drive_speed(x=0, y=0, z=vz_speed, timeout=0.1)
             time.sleep(0.01)
-        self.ep_gimbal.recenter().wait_for_completed()
+        self.ep_gimbal.moveto(yaw=0, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
         self.ep_chassis.drive_speed(0, 0, 0)
         print("   PID Turn: Completed.")
 
@@ -428,7 +426,7 @@ class MazeExplorer:
         start_time = time.time()
         time_limit_seconds = 600
         print(f"Mission started! Time limit: {time_limit_seconds} seconds.")
-        self.ep_gimbal.recenter().wait_for_completed()
+        self.ep_gimbal.moveto(yaw=0, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
         while True:
             elapsed_time = time.time() - start_time
             if elapsed_time >= time_limit_seconds:
