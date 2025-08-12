@@ -44,10 +44,8 @@ class VisionDataHandler:
 
     def update(self, vision_info):
         with self._lock:
-
             # vision_info เป็น list ของ detection tuples
             # รูปแบบพบบ่อย: (x, y, w, h, label) หรือ (x, y, w, h, label, ... )
-            markers = []
             if vision_info:
                 if not self._sample_logged:
                     print("[Vision raw] ->", vision_info)
@@ -57,8 +55,7 @@ class VisionDataHandler:
                         continue
                     label = t[4]
                     # เผื่อบางเวอร์ชันส่งเป็น int id หรือ str ชื่อ
-                    markers.append(str(label))
-            self.markers = markers
+                    self.markers.append(str(label))
 
 
     def get_markers(self):
@@ -162,7 +159,8 @@ class MazeExplorer:
         self.visited_path = [self.current_position]
         self.step_counter = 0  # <<< ADDED: นับจำนวนช่องที่เดิน เพื่อ trig ทุกๆ 2 ช่อง
         self.ep_led.set_led(r=0, g=0, b=255)
-        
+        self.raw_log = []  # [{'ts','x_m','y_m','yaw_deg','pitch_deg','tof_mm','grid_x','grid_y','note'}]
+
         # Reset pose at the beginning
         self.pose_handler.set_xy(0.0, 0.0)
         self.pose_handler.set_yaw(0.0)
@@ -172,10 +170,35 @@ class MazeExplorer:
         self.wall_log = set()   # เซตของกำแพงปิด (edge)
         self.marker_log = []    # {'name','gx','gy','wall','ts'}
         self.path_log = []      # {'step','gx','gy','yaw','ts'}
+    def log_raw_sample(self, note=""):
+        # อ่านค่าปัจจุบันจาก handlers (ไม่สั่งขยับใด ๆ)
+        x, y, z, yaw, pitch, roll = self.pose_handler.get_pose()
+        tof_mm = self.tof_handler.get_distance()
+        gx, gy = self.current_position
+        self.raw_log.append({
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "x_m": float(x),
+            "y_m": float(y),
+            "yaw_deg": float(yaw),
+            "pitch_deg": float(pitch),
+            "tof_mm": int(tof_mm) if tof_mm is not None else None,
+            "grid_x": gx,
+            "grid_y": gy,
+            "note": str(note) if note else ""
+        })
 
     # <<< ADDED: บันทึก CSV ตอนจบภารกิจ >>>
     def save_csv_logs(self):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if self.raw_log:
+            with open(f"raw_log_{ts}.csv", "w", newline='', encoding="utf-8") as f:
+                w = csv.DictWriter(
+                    f,
+                    fieldnames=["ts","x_m","y_m","yaw_deg","pitch_deg","tof_mm","grid_x","grid_y","note"]
+                )
+                w.writeheader()
+                for r in self.raw_log:
+                    w.writerow(r)
 
         if self.scan_log:
             with open(f"scan_log_{ts}.csv", "w", newline='', encoding="utf-8") as f:
@@ -375,7 +398,7 @@ class MazeExplorer:
         if (self.step_counter % 2) == 0:
             self.periodic_wall_clearance_adjust(target_clearance_m=0.20)
 
-    def turn_pid(self, target_angle, speed_limit=180):
+    def turn_pid(self, target_angle, speed_limit=60):
         print(f"   PID Turn: Turning to {target_angle} degrees.")
         pid = PIDController(Kp=1.5, Ki=0.05, Kd=0.5, setpoint=0, output_limits=(-speed_limit, speed_limit))
         while True:
@@ -428,6 +451,7 @@ class MazeExplorer:
         print(f"Mission started! Time limit: {time_limit_seconds} seconds.")
         self.ep_gimbal.moveto(yaw=0, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
         while True:
+            self.log_raw_sample(note="loop")
             elapsed_time = time.time() - start_time
             if elapsed_time >= time_limit_seconds:
                 print(f"\n--- TIME'S UP! ({int(elapsed_time)}s elapsed) ---")
@@ -437,6 +461,8 @@ class MazeExplorer:
             if self.current_position not in self.internal_map.explored:
                 previous_pos = self.visited_path[-2] if len(self.visited_path) > 1 else None
                 self.scan_surroundings_with_gimbal(previous_position=previous_pos)
+                self.log_raw_sample(note="after_scan")
+
             else:
                 print(f"\nPosition {self.current_position} already explored. Skipping scan.")
 
@@ -447,7 +473,8 @@ class MazeExplorer:
                 break
 
             self.execute_path(path_to_execute)
-            
+            self.log_raw_sample(note="after_move")
+
         print("\n--- Final Marker Map ---")
         if self.marker_map:
             for name, findings in sorted(self.marker_map.items()):
