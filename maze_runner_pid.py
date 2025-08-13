@@ -10,12 +10,12 @@ from robomaster import robot, vision
 # NOTE: matplotlib ใช้สำหรับวาดภาพแผนที่เมื่อรันบนคอมพิวเตอร์
 # หากรันบนหุ่นยนต์โดยตรง โค้ดจะยังคงทำงานและเซฟไฟล์ PNG ได้
 import matplotlib.pyplot as plt
-
+import statistics
 # ==============================================================================
 # การตั้งค่าและค่าคงที่ (Constants)
 # ==============================================================================
 GRID_SIZE_M = 0.635
-WALL_THRESHOLD_MM = 450
+WALL_THRESHOLD_MM = 500
 VISION_SCAN_DURATION_S = 1
 GIMBAL_TURN_SPEED = 450
 
@@ -26,15 +26,28 @@ WALL_NAMES = {0: "North Wall", 1: "East Wall", 2: "South Wall", 3: "West Wall"} 
 # คลาสจัดการข้อมูลและแผนที่ (Data Handlers & Map)
 # ==============================================================================
 class TofDataHandler:
-    def __init__(self):
-        self.distance = 0
+    def __init__(self, window_size=5):
         self._lock = threading.Lock()
+        self.raw_distance = 0.0            # ค่าดิบล่าสุด (mm)
+        self._window = deque(maxlen=window_size)
+        self._median = 0.0                 # ค่า median ปัจจุบัน
+
     def update(self, sub_info):
+        d = float(sub_info[0]) if sub_info else 0.0
         with self._lock:
-            self.distance = sub_info[0]
+            self.raw_distance = d
+            self._window.append(d)
+            self._median = statistics.median(self._window)
+
     def get_distance(self):
+        # คืนค่าแบบกรองแล้ว (median)
         with self._lock:
-            return self.distance
+            return self._median if self._window else self.raw_distance
+
+    def get_raw_distance(self):
+        # ถ้าต้องการค่า ToF ดิบ
+        with self._lock:
+            return self.raw_distance
 
 class VisionDataHandler:
     def __init__(self):
@@ -333,11 +346,9 @@ class MazeExplorer:
                     print("             Position is good, no adjustment needed for scan.")
                 time.sleep(0.2)
 
-                self.ep_chassis.drive_speed(x=0, y=0, z=0, timeout=0.1)
-                t0 = time.time()
-                detected_markers = []
-                while time.time() - t0 <  VISION_SCAN_DURATION_S:
-                    time.sleep(0.05)
+                for i in range(0, 60, 10):
+                    time.sleep(0.2)
+                    self.ep_gimbal.moveto(yaw=angle_to_turn_gimbal-30+i, pitch=-15, yaw_speed=GIMBAL_TURN_SPEED,pitch_speed=GIMBAL_TURN_SPEED).wait_for_completed()
                     dm = self.vision_handler.get_markers()
                     print(dm)
                     if dm:
