@@ -26,7 +26,7 @@ WALL_NAMES = {0: "North Wall", 1: "East Wall", 2: "South Wall", 3: "West Wall"} 
 # คลาสจัดการข้อมูลและแผนที่ (Data Handlers & Map)
 # ==============================================================================
 class TofDataHandler:
-    def __init__(self, window_size=5):
+    def __init__(self, window_size=3):
         self._lock = threading.Lock()
         self.raw_distance = 0.0            # ค่าดิบล่าสุด (mm)
         self._window = deque(maxlen=window_size)
@@ -340,17 +340,19 @@ class MazeExplorer:
 
                 if abs(move_dist_m) > 0.01:
                     print(f"             Adjusting position: move x={move_x:.2f}m, y={move_y:.2f}m.")
-                    self.ep_chassis.move(x=move_x, y=move_y, z=0, xy_speed=1.5).wait_for_completed()
+                    self.ep_chassis.move(x=move_x, y=move_y, z=0, xy_speed=2.5).wait_for_completed()
                     
                 else:
                     print("             Position is good, no adjustment needed for scan.")
                 time.sleep(0.2)
-
-                for i in range(0, 60, 10):
+                detected_markers=None
+                for i in range(3):
+                    if i == 1:
+                        self.ep_gimbal.moveto(yaw=angle_to_turn_gimbal-30, pitch=-15, yaw_speed=GIMBAL_TURN_SPEED,pitch_speed=GIMBAL_TURN_SPEED).wait_for_completed()
+                    if i == 2:
+                        self.ep_gimbal.moveto(yaw=angle_to_turn_gimbal+30, pitch=-15, yaw_speed=GIMBAL_TURN_SPEED,pitch_speed=GIMBAL_TURN_SPEED).wait_for_completed()
                     time.sleep(0.2)
-                    self.ep_gimbal.moveto(yaw=angle_to_turn_gimbal-30+i, pitch=-15, yaw_speed=GIMBAL_TURN_SPEED,pitch_speed=GIMBAL_TURN_SPEED).wait_for_completed()
                     dm = self.vision_handler.get_markers()
-                    print(dm)
                     if dm:
                         detected_markers = dm
                         break
