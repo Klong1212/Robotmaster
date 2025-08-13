@@ -4,13 +4,52 @@ import math
 import csv
 from datetime import datetime
 from collections import deque  # <<< เพิ่ม import นี้ไว้ด้านบน
+import json, os, sys           # <<< NEW
 import robomaster
-from robomaster import robot, vision
+from robomaster import robot, vision , camera
 
 # NOTE: matplotlib ใช้สำหรับวาดภาพแผนที่เมื่อรันบนคอมพิวเตอร์
 # หากรันบนหุ่นยนต์โดยตรง โค้ดจะยังคงทำงานและเซฟไฟล์ PNG ได้
 import matplotlib.pyplot as plt
 import statistics
+
+# ======================================================================
+# ESC listener (Windows non-blocking) / fallback stdin  <<< NEW
+# ======================================================================
+try:
+    import msvcrt  # Windows only
+    _HAS_MSVCRT = True
+except ImportError:
+    _HAS_MSVCRT = False
+
+STOP_FLAG = False  # ถูกตั้ง True เมื่อกด ESC
+
+def reset_stop_flag():  # <<< NEW
+    global STOP_FLAG
+    STOP_FLAG = False
+
+def _esc_listener():
+    """กด ESC เพื่อขอหยุดอย่างสุภาพ (ไม่บล็อก)"""
+    global STOP_FLAG
+    if _HAS_MSVCRT:
+        print("[Key] Press ESC to stop mission.")
+        while not STOP_FLAG:
+            if msvcrt.kbhit():
+                ch = msvcrt.getch()
+                if ch in (b'\x1b',):  # ESC
+                    print("\n[Key] ESC pressed -> stopping...")
+                    STOP_FLAG = True
+                    break
+            time.sleep(0.02)
+    else:
+        # fallback: ต้องพิมพ์ 'esc' แล้วกด Enter
+        print("[Key] Type 'esc' + Enter to stop mission (fallback).")
+        for line in sys.stdin:
+            if line.strip().lower() == "esc":
+                print("\n[Key] 'esc' typed -> stopping...")
+                STOP_FLAG = True
+                break
+
 # ==============================================================================
 # การตั้งค่าและค่าคงที่ (Constants)
 # ==============================================================================
@@ -22,8 +61,84 @@ GIMBAL_TURN_SPEED = 450
 ORIENTATIONS = {0: "North", 1: "East", 2: "South", 3: "West"}
 WALL_NAMES = {0: "North Wall", 1: "East Wall", 2: "South Wall", 3: "West Wall"}  # <<< CHANGED (พิมพ์ตก)
 
+# ======================================================================
+# State save/load (ต่อภารกิจรอบหน้า)  <<< NEW
+# ======================================================================
+STATE_FILE = "maze_state.json"
+
+def save_map_state(explorer, filename=STATE_FILE):
+    try:
+        state = {
+            "current_position": list(explorer.current_position),
+            "current_orientation": int(explorer.current_orientation),
+            "graph": {f"{k[0]},{k[1]}": [list(n) for n in v]
+                      for k, v in explorer.graph.items()},
+            "explored": [list(p) for p in explorer.explored],
+            "blocked": [[list(a), list(b)] for (a, b) in explorer.blocked],
+            "marker_map": {k: [[list(pos), wall] for (pos, wall) in v]
+                           for k, v in explorer.marker_map.items()},
+            "visited_path": [list(p) for p in explorer.visited_path],
+            "scan_log": explorer.scan_log,
+            "wall_log": [[list(a), list(b)] for (a, b) in explorer.wall_log],
+            "marker_log": explorer.marker_log,
+            "path_log": explorer.path_log,
+        }
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+        print(f"[STATE] Saved to '{filename}'")
+    except Exception as e:
+        print(f"[STATE] Save error: {e}")
+
+def load_map_state(explorer, filename=STATE_FILE):
+    if not os.path.exists(filename):
+        print(f"[STATE] No state file '{filename}', start fresh.")
+        return False
+    try:
+        with open(filename, "r", encoding="utf-8") as f:
+            s = json.load(f)
+        explorer.current_position = tuple(s.get("current_position", [0, 0]))
+        explorer.current_orientation = int(s.get("current_orientation", 0))
+        # graph
+        g = {}
+        for k, nb in s.get("graph", {}).items():
+            x, y = map(int, k.split(","))
+            g[(x, y)] = set(tuple(n) for n in nb)
+        explorer.graph = g
+        explorer.explored = set(tuple(p) for p in s.get("explored", []))
+        explorer.blocked = set(tuple(sorted((tuple(a), tuple(b))))
+                               for a, b in s.get("blocked", []))
+        # markers & logs
+        explorer.marker_map = {}
+        for k, items in s.get("marker_map", {}).items():
+            explorer.marker_map[k] = [(tuple(pos), wall) for pos, wall in items]
+        explorer.visited_path = [tuple(p) for p in s.get("visited_path", [[0, 0]])]
+        explorer.scan_log = s.get("scan_log", [])
+        explorer.wall_log = set(tuple(sorted((tuple(a), tuple(b))))
+                                for a, b in s.get("wall_log", []))
+        explorer.marker_log = s.get("marker_log", [])
+        explorer.path_log = s.get("path_log", [])
+
+        # sync pose ให้ตรงกริดล่าสุด/ทิศล่าสุด
+        gx, gy = explorer.current_position
+        explorer.pose_handler.set_xy(gx * GRID_SIZE_M, gy * GRID_SIZE_M)
+        ang = {0: 0, 1: 90, 2: 180, 3: -90}.get(explorer.current_orientation, 0)
+        explorer.pose_handler.set_yaw(ang)
+
+        print(f"[STATE] Loaded from '{filename}' -> pos={explorer.current_position}, "
+              f"ori={ORIENTATIONS.get(explorer.current_orientation)}")
+        return True
+    except Exception as e:
+        print(f"[STATE] Load error: {e}")
+        return False
+
+def _autosave(explorer):
+    try:
+        save_map_state(explorer)
+    except Exception as e:
+        print(f"[STATE] Autosave error: {e}")
+
 # ==============================================================================
-# คลาสจัดการข้อมูลและแผนที่ (Data Handlers & Map)
+# คลาสจัดการข้อมูล Vision/ToF/Pose (ยังคงไว้เพื่อไม่กระทบการเรียกใช้)
 # ==============================================================================
 class TofDataHandler:
     def __init__(self, window_size=3):
@@ -53,12 +168,12 @@ class VisionDataHandler:
     def __init__(self):
         self.markers = []
         self._lock = threading.Lock()
-        self._sample_logged = False  # log โครงสร้างครั้งแรกครั้งเดียว
+        self._sample_logged = False
+        self.on_update = None  # <<< เพิ่ม: callback จะถูกเรียกทุกครั้งที่อัปเดต
 
     def update(self, vision_info):
+        # เก็บเฉพาะ label ตามที่คุณใช้อยู่
         with self._lock:
-            # vision_info เป็น list ของ detection tuples
-            # รูปแบบพบบ่อย: (x, y, w, h, label) หรือ (x, y, w, h, label, ... )
             self.markers.clear()
             if vision_info:
                 if not self._sample_logged:
@@ -68,8 +183,15 @@ class VisionDataHandler:
                     if not isinstance(t, (list, tuple)) or len(t) < 5:
                         continue
                     label = t[4]
-                    # เผื่อบางเวอร์ชันส่งเป็น int id หรือ str ชื่อ
-                self.markers.append(str(label))
+                    self.markers.append(str(label))
+
+        # เรียก callback หลังจากอัปเดตค่าเสร็จ (อยู่นอก with เพื่อไม่ล็อกนาน)
+        if self.on_update:
+            try:
+                # ส่งสำเนาออกไปกันโดนแก้
+                self.on_update(list(self.markers))
+            except Exception as e:
+                print(f"[VisionDataHandler] on_update error: {e}")
 
     def get_markers(self):
         with self._lock:
@@ -95,40 +217,9 @@ class PoseDataHandler:
         with self._lock:
             self.pose[3] = float(yaw_deg)
 
-class RobotMap:
-    def __init__(self):
-        self.graph = {}
-        self.explored = set()
-        self.blocked = set()
-    def add_connection(self, pos1, pos2):
-        if pos1 not in self.graph: self.graph[pos1] = set()
-        if pos2 not in self.graph: self.graph[pos2] = set()
-        if pos2 not in self.graph[pos1]:
-            self.graph[pos1].add(pos2)
-            self.graph[pos2].add(pos1)
-
-    def add_blocked(self, pos1, pos2):
-        edge = tuple(sorted([pos1, pos2]))
-        self.blocked.add(edge)
-    def mark_explored(self, position):
-        self.explored.add(position)
-    def get_unexplored_neighbors(self, position):
-        if position not in self.graph: return []
-        return [n for n in self.graph.get(position, []) if n not in self.explored]
-    def get_path(self, start, goal):
-        if start == goal: return [start]
-        queue = [(start, [start])]
-        visited = {start}
-        print("queue: ",queue)
-        while queue:
-            current, path = queue.pop(0)
-            for neighbor in self.graph.get(current, []):
-                if neighbor not in visited:
-                    if neighbor == goal: return path + [neighbor]
-                    visited.add(neighbor)
-                    queue.append((neighbor, path + [neighbor]))
-        return None
-
+# ======================================================================
+# PID (คงไว้เหมือนเดิม)
+# ======================================================================
 class PIDController:
     def __init__(self, Kp, Ki, Kd, setpoint=0.0, output_limits=(-1.0, 1.0)):
         self.Kp, self.Ki, self.Kd = Kp, Ki, Kd
@@ -153,6 +244,7 @@ class PIDController:
 
 # ==============================================================================
 # คลาสหลักสำหรับควบคุมตรรกะของหุ่นยนต์ (MazeExplorer)
+#   - ลดการใช้ class โดยยุบ RobotMap มาอยู่ในนี้
 # ==============================================================================
 class MazeExplorer:
     def __init__(self, ep_robot, tof_handler, vision_handler, pose_handler):
@@ -164,14 +256,24 @@ class MazeExplorer:
         self.tof_handler = tof_handler
         self.vision_handler = vision_handler
         self.pose_handler = pose_handler
+        self.latest_markers = []           # <<< ล่าสุดที่เห็นแบบ real-time
+        self._marker_seen_keys = set()     # <<< กัน log ซ้ำ (name, grid, wall)
+
         self.current_position = (0, 0)
         self.current_orientation = 0 # 0:N, 1:E, 2:S, 3:W
-        self.internal_map = RobotMap()
+
+        # ===== แทนที่ RobotMap =====
+        self.graph = {}          # pos -> set(neighbors)
+        self.explored = set()    # set(pos)
+        self.blocked = set()     # set(tuple(sorted((a,b))))
+        # ===========================
+
         self.marker_map = {}
         self.visited_path = [self.current_position]
-        self.step_counter = 0  # <<< นับจำนวนช่องที่เดิน เพื่อ trig ทุกๆ 2 ช่อง
+        self.step_counter = 0
         self.ep_led.set_led(r=0, g=0, b=255)
-        self.border=(1,2)
+        self.border=(2,2)
+
         # Reset pose at the beginning
         self.pose_handler.set_xy(0.0, 0.0)
         self.pose_handler.set_yaw(0.0)
@@ -186,6 +288,85 @@ class MazeExplorer:
         self.continuous_sensor_log = []   # เก็บ dict ต่อเนื่อง
         self._logging_thread = None
         self._logging_thread_active = False
+    def on_markers_update(self, markers):
+        # เก็บค่าไว้ใช้งานสดๆ
+        self.latest_markers = markers
+
+        # (ออปชัน) Auto-log แบบทันที เมื่ออยู่ใกล้กำแพงพอ (เช่น < 0.40 m)
+        # และรู้ว่าตอนนี้กำลังส่องกำแพงทิศไหนจาก current_orientation (ขึ้นกับการสแกน)
+        try:
+            if not markers:
+                return
+
+            # ระยะปัจจุบันจาก ToF (ใช้ median ที่คุณทำไว้)
+            distance_mm = self.tof_handler.get_distance()
+            if distance_mm >= 400:
+                return  # ยังไกลไป อย่าเพิ่ง log
+
+            # ระบุ wall จากทิศที่กำลังหันสแกน (ใช้ current_orientation เป็นฐาน)
+            wall_name = {0:"North Wall", 1:"East Wall", 2:"South Wall", 3:"West Wall"}.get(
+                self.current_orientation, "Unknown Wall"
+            )
+
+            # grid ปัจจุบัน
+            gx, gy = self.current_position
+
+            for marker_name in markers:
+                key = (marker_name, gx, gy, wall_name)
+                if key in self._marker_seen_keys:
+                    continue  # เคยบันทึกแล้ว ข้าม
+
+                # บันทึกทั้งใน marker_map และ marker_log (ฟอร์แมตเดิม)
+                if marker_name not in self.marker_map:
+                    self.marker_map[marker_name] = []
+                finding = ((gx, gy), wall_name)
+                if finding not in self.marker_map[marker_name]:
+                    self.marker_map[marker_name].append(finding)
+
+                self.marker_log.append({
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "name": marker_name,
+                    "grid_x": gx, "grid_y": gy,
+                    "wall": wall_name
+                })
+                self._marker_seen_keys.add(key)
+                print(f"[AUTO-LOG] Marker '{marker_name}' at Grid {(gx,gy)} on {wall_name}")
+
+        except Exception as e:
+            print(f"[MazeExplorer.on_markers_update] error: {e}")
+
+    # ====== เมธอดทดแทน RobotMap (ชื่อขึ้นต้นด้วย _ เพื่อบอกว่าใช้ภายใน) ======
+    def _add_connection(self, pos1, pos2):
+        if pos1 not in self.graph: self.graph[pos1] = set()
+        if pos2 not in self.graph: self.graph[pos2] = set()
+        if pos2 not in self.graph[pos1]:
+            self.graph[pos1].add(pos2)
+            self.graph[pos2].add(pos1)
+
+    def _add_blocked(self, pos1, pos2):
+        edge = tuple(sorted([pos1, pos2]))
+        self.blocked.add(edge)
+
+    def _mark_explored(self, position):
+        self.explored.add(position)
+
+    def _get_unexplored_neighbors(self, position):
+        if position not in self.graph: return []
+        return [n for n in self.graph.get(position, []) if n not in self.explored]
+
+    def _get_path(self, start, goal):
+        if start == goal: return [start]
+        queue = [(start, [start])]
+        visited = {start}
+        while queue:
+            current, path = queue.pop(0)
+            for neighbor in self.graph.get(current, []):
+                if neighbor not in visited:
+                    if neighbor == goal: return path + [neighbor]
+                    visited.add(neighbor)
+                    queue.append((neighbor, path + [neighbor]))
+        return None
+    # =====================================================================
 
     # -------------------- Continuous Sensor Logging (NEW) --------------------
     def _continuous_log_worker(self, frequency_hz=10):
@@ -206,7 +387,6 @@ class MazeExplorer:
                 })
             except Exception as e:
                 print(f"[Logging Thread] Error: {e}")
-            # คุมความถี่
             dt = time.time() - t0
             if dt < period:
                 time.sleep(period - dt)
@@ -280,7 +460,7 @@ class MazeExplorer:
     def scan_surroundings_with_gimbal(self, previous_position=None):
         print(f"\nScanning surroundings at {self.current_position} with Gimbal...")
         self.ep_led.set_led(r=255, g=255, b=0, effect="breathing")
-        self.internal_map.mark_explored(self.current_position)
+        self._mark_explored(self.current_position)
         x, y = self.current_position
         
         wall_distances = {} # เก็บระยะทาง
@@ -288,7 +468,7 @@ class MazeExplorer:
         direction_to_skip = -1
         if previous_position:
             print(f"   -> Path from {previous_position} is known. Adding connection automatically.")
-            self.internal_map.add_connection(self.current_position, previous_position)
+            self._add_connection(self.current_position, previous_position)
             direction_to_skip = (self.current_orientation + 2) % 4
             print(f"   -> Will skip physical scan for direction {ORIENTATIONS.get(direction_to_skip, 'N/A')}.")
 
@@ -307,30 +487,27 @@ class MazeExplorer:
             if angle_to_turn_gimbal > 180: angle_to_turn_gimbal -= 360
             if angle_to_turn_gimbal < -180: angle_to_turn_gimbal += 360
 
-            self.ep_gimbal.moveto(yaw=angle_to_turn_gimbal, pitch=0, yaw_speed=GIMBAL_TURN_SPEED,pitch_speed=GIMBAL_TURN_SPEED).wait_for_completed()
-            time.sleep(0.5)  # ให้เวลาหุ่นยนต์ปรับตำแหน่งก่อนวัด
-            self.ep_gimbal.moveto(yaw=angle_to_turn_gimbal, pitch=-15, yaw_speed=GIMBAL_TURN_SPEED,pitch_speed=GIMBAL_TURN_SPEED).wait_for_completed()
-
-
-            time.sleep(0.5)
+            self.ep_gimbal.moveto(yaw=angle_to_turn_gimbal+45, pitch=0, yaw_speed=GIMBAL_TURN_SPEED,pitch_speed=GIMBAL_TURN_SPEED).wait_for_completed()
+            scan = True 
+            self.ep_gimbal.moveto(pitch=-15, yaw=i * -90 + 45, yaw_speed=30).wait_for_completed()
+            scan = False
             distance_mm = self.tof_handler.get_distance()
             print(f"         - ToF distance: {distance_mm} mm")
             wall_distances[f'{scan_direction}'] = distance_mm
 
             if distance_mm >= WALL_THRESHOLD_MM:
                 if neighbor_pos[0] >= 0 and neighbor_pos[1] >= 0 and neighbor_pos[0] < self.border[0] and neighbor_pos[1] < self.border[1]:
-                    self.internal_map.add_connection(self.current_position, neighbor_pos)
-                    print(f"           - Skipping scan for {ORIENTATIONS[scan_direction]} wall at {neighbor_pos} (out of bounds).")
+                    self._add_connection(self.current_position, neighbor_pos)
+                    print(f"           - Open path recorded at {neighbor_pos}.")
                     continue
-                
             else:
                 print(f"           - Wall detected at {distance_mm}mm. Preparing to scan for markers.")
                 # --- เตรียมเข้าใกล้เพื่อสแกน แล้วกลับ ---
                 move_dist_m = (distance_mm / 1000.0) - 0.20
                 move_dist_m_y = (distance_mm / 1000.0) - 0.20
                 relative_direction = (scan_direction - self.current_orientation + 4) % 4
-                self.internal_map.add_blocked(self.current_position, neighbor_pos)
-                self.wall_log.add(tuple(sorted([self.current_position, neighbor_pos])))  # <<< เก็บสำหรับ CSV
+                self._add_blocked(self.current_position, neighbor_pos)
+                self.wall_log.add(tuple(sorted([self.current_position, neighbor_pos])))  # สำหรับ CSV
 
                 move_x, move_y = 0.0, 0.0
                 if relative_direction == 0:   # หน้า
@@ -345,7 +522,6 @@ class MazeExplorer:
                 if abs(move_dist_m) > 0.01:
                     print(f"             Adjusting position: move x={move_x:.2f}m, y={move_y:.2f}m.")
                     self.ep_chassis.move(x=move_x, y=move_y, z=0, xy_speed=2.5).wait_for_completed()
-                    
                 else:
                     print("             Position is good, no adjustment needed for scan.")
                 time.sleep(0.2)
@@ -392,18 +568,18 @@ class MazeExplorer:
             "S_mm": pick(wall_distances, '2'),
             "W_mm": pick(wall_distances, '3')
         })
+        _autosave(self)  # <<< NEW: autosave หลังสแกนหนึ่งจุด
 
         return wall_distances
 
     def decide_next_path(self):
-        unexplored = self.internal_map.get_unexplored_neighbors(self.current_position)
+        unexplored = self._get_unexplored_neighbors(self.current_position)
         if unexplored:
             return [self.current_position, unexplored[0]]
         for pos in reversed(self.visited_path):
-            if self.internal_map.get_unexplored_neighbors(pos):
+            if self._get_unexplored_neighbors(pos):
                 print(f"No new paths here. Backtracking to find an unexplored path from {pos}...")
-
-                return self.internal_map.get_path(self.current_position, pos)
+                return self._get_path(self.current_position, pos)
         return None
 
     def periodic_wall_clearance_adjust(self, target_clearance_m=0.18):
@@ -411,12 +587,7 @@ class MazeExplorer:
         ใช้ ToF ด้านหน้าตาม orientation ปัจจุบัน ถ้ามีกำแพง (dist < threshold)
         จะขยับเข้า/ออกให้เข้าใกล้ target_clearance_m
         """
-        
-                    
         for scan_direction in range(4):
-
-
-
             print(f"   Scanning new area in direction: {ORIENTATIONS[scan_direction]}...")
             angle_to_turn_gimbal = (scan_direction - self.current_orientation) * 90
             if angle_to_turn_gimbal > 180: angle_to_turn_gimbal -= 360
@@ -426,14 +597,12 @@ class MazeExplorer:
             time.sleep(0.5)  # ให้เวลาหุ่นยนต์ปรับตำแหน่งก่อนวัด
             self.ep_gimbal.moveto(yaw=angle_to_turn_gimbal, pitch=-15, yaw_speed=GIMBAL_TURN_SPEED,pitch_speed=GIMBAL_TURN_SPEED).wait_for_completed()
 
-
             time.sleep(0.5)
             distance_mm = self.tof_handler.get_distance()
             print(f"         - ToF distance: {distance_mm} mm")
 
             if distance_mm < WALL_THRESHOLD_MM:
                 print(f"           - Wall detected at {distance_mm}mm. Preparing to scan for markers.")
-                # --- เตรียมเข้าใกล้เพื่อสแกน แล้วกลับ ---
                 move_dist_m = (distance_mm / 1000.0) - 0.18
                 move_dist_m_y = (distance_mm / 1000.0) - 0.18
                 relative_direction = (scan_direction - self.current_orientation + 4) % 4
@@ -451,14 +620,13 @@ class MazeExplorer:
                 if abs(move_dist_m) > 0.05:
                     print(f"             Adjusting position: move x={move_x:.2f}m, y={move_y:.2f}m.")
                     self.ep_chassis.move(x=move_x, y=move_y, z=0, xy_speed=0.3).wait_for_completed()
-                    
                 else:
                     print("             Position is good, no adjustment needed for scan.")
                 time.sleep(0.2)
 
-
                 self.ep_chassis.drive_speed(x=0, y=0, z=0, timeout=0.1)
-                
+
+    # ======== ห้ามแก้ตรรกะการเคลื่อนที่เดิม ========
     def move_forward_pid(self, distance_m, speed_limit=5):
         print(f"   PID Move: Moving forward {distance_m}m.")
         pid = PIDController(Kp=2, Ki=0.2, Kd=0.25, setpoint=distance_m, output_limits=(-speed_limit, speed_limit))
@@ -474,7 +642,6 @@ class MazeExplorer:
         self.ep_chassis.drive_speed(0, 0, 0)
         print("   PID Move: Completed.")
 
-        # log path step
         gx, gy = self.current_position
         _, _, _, yaw, _, _ = self.pose_handler.get_pose()
         self.path_log.append({
@@ -504,9 +671,8 @@ class MazeExplorer:
         self.ep_led.set_led(r=0, g=0, b=255)
         num=1
         for i in range(len(path) - 1):
-            print(self.current_position in self.internal_map.explored , num % 2)
-            if self.current_position in self.internal_map.explored and num % 2 == 0:
-
+            print(self.current_position in self.explored , num % 2)
+            if self.current_position in self.explored and num % 2 == 0:
                 self.periodic_wall_clearance_adjust(target_clearance_m=0.18)
                 print(f"\nPosition {self.current_position} already explored. Skipping scan.")
             num+=1
@@ -533,6 +699,7 @@ class MazeExplorer:
             self.pose_handler.set_xy(end_node[0] * GRID_SIZE_M, end_node[1] * GRID_SIZE_M)
             self.pose_handler.set_yaw(target_angle)
             time.sleep(0.2)
+            _autosave(self)  # <<< NEW: autosave เมื่อถึงกริดใหม่
             print("end++++++++++++++++++++++++++++++++++++++++++++++++++")
 
     # <--- ลำดับการทำงานใน run_mission (เดิม) --->
@@ -548,20 +715,29 @@ class MazeExplorer:
             if elapsed_time >= time_limit_seconds:
                 print(f"\n--- TIME'S UP! ({int(elapsed_time)}s elapsed) ---")
                 self.ep_led.set_led(r=255, g=193, b=7, effect="flash")
+                _autosave(self)  # <<< NEW
                 break
 
-            
-            if self.current_position not in self.internal_map.explored:
+            if STOP_FLAG:
+                print("\n--- ESC received: stopping mission gracefully ---")
+                _autosave(self)  # <<< NEW
+                break
 
+            # บังคับสแกนถ้าจุดปัจจุบันไม่มีเพื่อนบ้านในกราฟ
+            need_scan = (
+                self.current_position not in self.graph or
+                len(self.graph.get(self.current_position, [])) == 0
+            )
+            if need_scan or (self.current_position not in self.explored):
                 previous_pos = self.visited_path[-2] if len(self.visited_path) > 1 else None
                 self.scan_surroundings_with_gimbal(previous_position=previous_pos)
+
             path_to_execute = self.decide_next_path()
             if not path_to_execute:
                 print("\n--- MISSION COMPLETE! All areas explored. ---")
                 self.ep_led.set_led(r=0, g=255, b=0, effect="on")
                 break
             self.execute_path(path_to_execute)
-            
             
         print("\n--- Final Marker Map ---")
         if self.marker_map:
@@ -573,14 +749,13 @@ class MazeExplorer:
             print("   No markers were logged.")
 
         plot_map_with_walls(
-            self.internal_map.graph,
-            self.internal_map.blocked,
+            self.graph,
+            self.blocked,
             self.visited_path,
             self.marker_map,
             filename="maze_map.png"
         )
 
-        # เดิมมีอยู่แล้ว: บันทึก CSV ของระบบ mapping
         self.save_csv_logs()
 
 
@@ -627,10 +802,9 @@ def plot_map_with_walls(graph, blocked, path, marker_map, filename="maze_map.png
         plt.scatter(px[0], py[0], s=120, color="green", marker='o', zorder=5, label='Start')
         plt.scatter(px[-1], py[-1], s=120, color="purple", marker='X', zorder=5, label='End')
 
-    # วาง Marker “บนกำแพง” ของกริดที่พบ  # <<< CHANGED
+    # วาง Marker “บนกำแพง” ของกริดที่พบ
     for name, hits in (marker_map or {}).items():
         for (gx, gy), wall in hits:
-            # คำนวณตำแหน่งกลางกำแพงของกริด (gx, gy)
             if wall == "North Wall":
                 mx, my = gx, gy + 0.4
             elif wall == "East Wall":
@@ -640,9 +814,8 @@ def plot_map_with_walls(graph, blocked, path, marker_map, filename="maze_map.png
             elif wall == "West Wall":
                 mx, my = gx - 0.4, gy
             else:
-                mx, my = gx, gy  # เผื่อกรณีพิเศษ
-
-            plt.scatter([mx], [my], s=60, marker='o', color="red", zorder=6)  # วางบนผนัง
+                mx, my = gx, gy
+            plt.scatter([mx], [my], s=60, marker='o', color="red", zorder=6)
             plt.text(mx + 0.06, my + 0.06, f"{name}", fontsize=8, zorder=7)
 
     plt.gca().set_aspect('equal', adjustable='box')
@@ -659,15 +832,20 @@ def plot_map_with_walls(graph, blocked, path, marker_map, filename="maze_map.png
 if __name__ == '__main__':
     ep_robot = None
     explorer = None
+    esc_thread = None
     try:
+        # <<< NEW: รีเซ็ตธงหยุดทุกครั้งก่อนเริ่มรอบใหม่
+        reset_stop_flag()
+
         ep_robot = robot.Robot()
         ep_robot.initialize(conn_type="ap")
         print("Robot connected.")
         tof_handler = TofDataHandler()
         vision_handler = VisionDataHandler()
         ep_vision = ep_robot.vision
-
+        ep_camera = ep_robot.camera
         pose_handler = PoseDataHandler()
+        ep_camera.start_video_stream(display=True, resolution=camera.STREAM_360P)
         ep_robot.sensor.sub_distance(freq=10, callback=tof_handler.update)
         ep_robot.chassis.sub_position(freq=10, callback=pose_handler.update_position)
         ep_robot.chassis.sub_attitude(freq=10, callback=pose_handler.update_attitude)
@@ -675,6 +853,13 @@ if __name__ == '__main__':
 
         print("Subscribed to all required sensors.")
         explorer = MazeExplorer(ep_robot, tof_handler, vision_handler, pose_handler)
+        vision_handler.on_update = explorer.on_markers_update
+        # <<< NEW: เริ่มตัวฟัง ESC ก่อนทำอย่างอื่น
+        esc_thread = threading.Thread(target=_esc_listener, daemon=True)
+        esc_thread.start()
+
+        # <<< NEW: โหลดสถานะเดิม (ถ้ามี) เพื่อให้ "ต่อจากเดิม"
+        load_map_state(explorer)
 
         # <<< เริ่มบันทึกเซนเซอร์แบบต่อเนื่องทันทีหลัง subscribe >>>
         print("Starting continuous sensor logging...")
@@ -691,6 +876,8 @@ if __name__ == '__main__':
             print("Stopping continuous sensor logging...")
             explorer.stop_continuous_logging()
             explorer.save_csv_logs()
+            # <<< NEW: เซฟสถานะล่าสุดเพื่อให้รันใหม่แล้วต่อได้ทันที
+            save_map_state(explorer)
 
         if ep_robot:
             ep_robot.sensor.unsub_distance()
