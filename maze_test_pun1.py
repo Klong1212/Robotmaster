@@ -56,7 +56,7 @@ GIMBAL_TURN_SPEED = 450
 ORIENTATIONS = {0: "North", 1: "East", 2: "South", 3: "West"}
 
 # กล้อง: FOV แนวนอน (เดา/ปรับตามรุ่นจริงหากทราบแน่นอน)
-CAMERA_HFOV_DEG = 78.0  # ปรับตามสเปคจริงถ้ามี
+CAMERA_HFOV_DEG = 96.0  # ปรับตามสเปคจริงถ้ามี
 
 # ======================================================================
 # State save/load
@@ -577,7 +577,7 @@ class MazeExplorer:
 
                 if abs(move_dist_m) > 0.01:
                     print(f"             Adjusting position: move x={move_x:.2f}m, y={move_y:.2f}m.")
-                    self.ep_chassis.move(x=move_x, y=move_y, z=0, xy_speed=2.0).wait_for_completed()
+                    self.ep_chassis.move(x=move_x, y=move_y, z=0, xy_speed=1.0).wait_for_completed()
                 time.sleep(0.2)
 
                 # กวาดซ้าย/ขวาเล็กน้อยเพื่อหา marker
@@ -643,7 +643,7 @@ class MazeExplorer:
 
                 if abs(move_dist_m) > 0.05:
                     print(f"             Adjusting position: move x={move_x:.2f}m, y={move_y:.2f}m.")
-                    self.ep_chassis.move(x=move_x, y=move_y, z=0, xy_speed=0.3).wait_for_completed()
+                    self.ep_chassis.move(x=move_x, y=move_y, z=0, xy_speed=1).wait_for_completed()
                 time.sleep(0.2)
                 self.ep_chassis.drive_speed(x=0, y=0, z=0, timeout=0.1)
 
