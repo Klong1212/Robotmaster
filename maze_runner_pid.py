@@ -171,7 +171,7 @@ class MazeExplorer:
         self.visited_path = [self.current_position]
         self.step_counter = 0  # <<< นับจำนวนช่องที่เดิน เพื่อ trig ทุกๆ 2 ช่อง
         self.ep_led.set_led(r=0, g=0, b=255)
-        
+        self.border=(1,2)
         # Reset pose at the beginning
         self.pose_handler.set_xy(0.0, 0.0)
         self.pose_handler.set_yaw(0.0)
@@ -318,7 +318,11 @@ class MazeExplorer:
             wall_distances[f'{scan_direction}'] = distance_mm
 
             if distance_mm >= WALL_THRESHOLD_MM:
-                self.internal_map.add_connection(self.current_position, neighbor_pos)
+                if neighbor_pos[0] >= 0 and neighbor_pos[1] >= 0 and neighbor_pos[0] < self.border[0] and neighbor_pos[1] < self.border[1]:
+                    self.internal_map.add_connection(self.current_position, neighbor_pos)
+                    print(f"           - Skipping scan for {ORIENTATIONS[scan_direction]} wall at {neighbor_pos} (out of bounds).")
+                    continue
+                
             else:
                 print(f"           - Wall detected at {distance_mm}mm. Preparing to scan for markers.")
                 # --- เตรียมเข้าใกล้เพื่อสแกน แล้วกลับ ---
