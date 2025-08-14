@@ -6,7 +6,7 @@ from datetime import datetime
 from collections import deque
 import json, os, sys
 import robomaster
-from robomaster import robot, vision, camera
+from robomaster import robot, vision  # <<< ตัด camera ออกแล้ว
 
 import matplotlib.pyplot as plt
 import statistics
@@ -55,20 +55,18 @@ GIMBAL_TURN_SPEED = 450
 
 ORIENTATIONS = {0: "North", 1: "East", 2: "South", 3: "West"}
 
-# กล้อง: FOV แนวนอน (เดา/ปรับตามรุ่นจริงหากทราบแน่นอน)
-CAMERA_HFOV_DEG = 96.0  # ปรับตามสเปคจริงถ้ามี
+# กล้อง: FOV แนวนอนของโมดูล vision (ไม่ต้องเปิดสตรีม/ไม่ต้องใช้ camera module)
+CAMERA_HFOV_DEG = 96.0
 
 # ---- Marker fusion parameters ----
-MERGE_RADIUS_M = 0.20          # ระยะรวมคลัสเตอร์ (เมตร) ~ 1/3 ช่องกริด 0.6
-BEARING_GATING_DEG = 25.0      # เกทด้วยความใกล้มุม เพื่อกันคนละผนัง/คนละมุม
-EMA_ALPHA = 0.35               # น้ำหนักข้อมูลใหม่เวลา merge
+MERGE_RADIUS_M = 0.20
+BEARING_GATING_DEG = 25.0
+EMA_ALPHA = 0.35
 
 def _wrap_angle_deg(a: float) -> float:
-    """ห่อองศาให้อยู่ช่วง (-180, 180]"""
     return ((a + 180.0) % 360.0) - 180.0
 
 def _angle_diff_deg(a: float, b: float) -> float:
-    """ผลต่างมุมแบบห่อองศา: a - b ในช่วง (-180,180]"""
     return _wrap_angle_deg(a - b)
 
 def _ema(old: float, new: float, alpha: float = EMA_ALPHA) -> float:
@@ -88,7 +86,6 @@ def save_map_state(explorer, filename=STATE_FILE):
                       for k, v in explorer.graph.items()},
             "explored": [list(p) for p in explorer.explored],
             "blocked": [[list(a), list(b)] for (a, b) in explorer.blocked],
-            # marker_map เก็บเป็น ((mx,my), meta)
             "marker_map": {k: [[list(pos), meta] for (pos, meta) in v]
                            for k, v in explorer.marker_map.items()},
             "visited_path": [list(p) for p in explorer.visited_path],
@@ -123,7 +120,6 @@ def load_map_state(explorer, filename=STATE_FILE):
 
         explorer.marker_map = {}
         for k, items in s.get("marker_map", {}).items():
-            # อ่านกลับ ((mx,my), meta)
             explorer.marker_map[k] = [(tuple(pos), meta) for pos, meta in items]
 
         explorer.visited_path = [tuple(p) for p in s.get("visited_path", [[0, 0]])]
@@ -133,7 +129,6 @@ def load_map_state(explorer, filename=STATE_FILE):
         explorer.marker_log = s.get("marker_log", [])
         explorer.path_log = s.get("path_log", [])
 
-        # sync pose
         gx, gy = explorer.current_position
         explorer.pose_handler.set_xy(gx * GRID_SIZE_M, gy * GRID_SIZE_M)
         ang = {0: 0, 1: 90, 2: 180, 3: -90}.get(explorer.current_orientation, 0)
@@ -179,10 +174,9 @@ class TofDataHandler:
 
 class VisionDataHandler:
     """
-    เก็บ detection พร้อม xnorm:
+    ใช้เฉพาะโมดูล vision (ไม่ใช้ camera stream)
     - last_detections: { label(str): {"x": float, "y": float, "w": float, "h": float, "ts": iso} }
-    - get_markers(): รายชื่อ label อย่างเดียว (สำหรับ continuous log)
-    - on_update(dict) callback: ส่งสำเนา last_detections ให้ MazeExplorer ใช้คำนวณพิกัดจริง
+    - on_update(dict): callback ส่งสำเนาให้ MazeExplorer ใช้คำนวณพิกัดจริง
     """
     def __init__(self):
         self.last_detections = {}
@@ -199,16 +193,14 @@ class VisionDataHandler:
                     print("[Vision raw] ->", vision_info)
                     self._sample_logged = True
                 for t in vision_info:
-                    # SDK: (x, y, w, h, info)
+                    # SDK tuple: (x, y, w, h, info)
                     if not isinstance(t, (list, tuple)) or len(t) < 5:
                         continue
                     x, y, w, h, label = t[0], t[1], t[2], t[3], str(t[4])
-                    # x,y,w,h เป็น normalized 0..1
                     self.last_detections[label] = {"x": float(x), "y": float(y), "w": float(w), "h": float(h), "ts": now_iso}
 
         if self.on_update:
             try:
-                det_copy = {}
                 with self._lock:
                     det_copy = {k: v.copy() for k, v in self.last_detections.items()}
                 self.on_update(det_copy)
@@ -292,22 +284,21 @@ class MazeExplorer:
         self.tof_handler = tof_handler
         self.vision_handler = vision_handler
         self.pose_handler = pose_handler
-        self.gimbal_handler = None  # แนบใน __main__
+        self.gimbal_handler = None  # จะถูกแนบใน __main__
 
         self.current_position = (0, 0)
-        self.current_orientation = 0 # 0:N, 1:E, 2:S, 3:W
+        self.current_orientation = 0  # 0:N, 1:E, 2:S, 3:W
 
         self.graph = {}
         self.explored = set()
         self.blocked = set()
 
         # marker_map: name -> [ ((mx,my), meta), ... ]
-        # meta: {"xnorm": float, "bearing_deg": float, "dist_m": float, "ts": str, "count": int, ...}
         self.marker_map = {}
         self.visited_path = [self.current_position]
         self.step_counter = 0
         self.ep_led.set_led(r=0, g=0, b=255)
-        self.border=(2,2)
+        self.border = (2, 2)
 
         self.pose_handler.set_xy(0.0, 0.0)
         self.pose_handler.set_yaw(0.0)
@@ -321,8 +312,10 @@ class MazeExplorer:
         self._logging_thread = None
         self._logging_thread_active = False
 
-        # ใช้เก็บทิศศูนย์ของการกวาดในแต่ละครั้ง (ไม่บังคับต้องใช้)
         self._sweep_center_deg = 0.0
+
+        # --- ป้องกัน error: ใช้สำหรับ de-dup ต่อเฟรม ---
+        self._marker_seen_keys = set()
 
     # ---------- Graph helpers ----------
     def _add_connection(self, pos1, pos2):
@@ -396,10 +389,6 @@ class MazeExplorer:
 
     # -------------------- Marker upsert/merge --------------------
     def _upsert_marker(self, label, mx, my, meta):
-        """
-        รวมจุดมาร์กเกอร์ถ้าอยู่ใกล้ (ระยะ <= MERGE_RADIUS_M) และมุมใกล้ (<= BEARING_GATING_DEG)
-        ใช้หน่วยกริดภายใน แต่กำหนดรัศมีเป็นเมตรแล้วแปลงเป็นกริด
-        """
         r_grid = MERGE_RADIUS_M / GRID_SIZE_M
         bearing_new = float(meta.get("bearing_deg", 0.0))
 
@@ -422,7 +411,6 @@ class MazeExplorer:
             self.marker_map[label].append(((mx, my), {**meta, "count": 1}))
             return "created"
 
-        # merge
         (ex, ey), emeta = self.marker_map[label][best_i]
         new_x = _ema(ex, mx)
         new_y = _ema(ey, my)
@@ -450,40 +438,32 @@ class MazeExplorer:
 
     # -------------------- Marker callback (คำนวณพิกัดจริง) --------------------
     def on_markers_update(self, detections: dict):
-        """
-        detections: {label: {"x": xnorm, "y": ynorm, "w": w, "h": h, "ts": iso}}
-        แปลง xnorm -> มุม offset และใช้ yaw หุ่นยนต์ + yaw กิมบอล + ToF -> คำนวณ (mx,my) หน่วยกริด
-        """
         try:
-            if not detections:
-                return
-
-            # ระยะจาก ToF (m)
-            distance_m = max(self.tof_handler.get_distance(), 0.0) / 1000.0
-            if distance_m <= 0.05:  # ใกล้เกิน/ไม่มีข้อมูล
-                return
-
-            # pose หุ่นยนต์: x,y เป็น "เมตร" -> แปลงเป็นกริด
+            if not detections: return
+            distance_mm = self.tof_handler.get_distance()
+            if not (50 < distance_mm < 500): return
+            distance_m = distance_mm / 1000.0
             x_m, y_m, _, robot_yaw_deg, _, _ = self.pose_handler.get_pose()
-            grid_x = x_m / GRID_SIZE_M
-            grid_y = y_m / GRID_SIZE_M
+            grid_x, grid_y = x_m / GRID_SIZE_M, y_m / GRID_SIZE_M
+            gimbal_yaw_deg = self.gimbal_handler.get()[1] if self.gimbal_handler else 0.0
 
-            # yaw กิมบอล
-            gimbal_yaw_deg = 0.0
-            if self.gimbal_handler is not None:
-                _, gimbal_yaw_deg, _, _ = self.gimbal_handler.get()
+            # เคลียร์คีย์ de-dup ต่อเฟรม
+            self._marker_seen_keys.clear()
 
             for label, info in detections.items():
-                xnorm = float(info["x"])  # 0..1
-
-                # offset มุมจากตำแหน่งในภาพ (ซ้ายบวก/ขวาลบ ใช้ (0.5 - x))
+                xnorm = float(info["x"])
                 angular_offset = (0.5 - xnorm) * CAMERA_HFOV_DEG
+                bearing_deg = robot_yaw_deg + gimbal_yaw_deg + angular_offset
 
-                bearing_deg = _wrap_angle_deg(robot_yaw_deg + gimbal_yaw_deg + angular_offset)
-                # แปลงเป็นเวคเตอร์บนแกนกริด
+                # หมายเหตุ: ถ้าระบบแกน 0°=North ให้สลับ sin/cos ตาม convention ของคุณ
                 dx_grid = (distance_m / GRID_SIZE_M) * math.cos(math.radians(bearing_deg))
                 dy_grid = (distance_m / GRID_SIZE_M) * math.sin(math.radians(bearing_deg))
                 mx, my = grid_x + dx_grid, grid_y + dy_grid
+
+                key = (label, round(mx, 2), round(my, 2))
+                if key in self._marker_seen_keys:
+                    continue
+                self._marker_seen_keys.add(key)
 
                 meta = {
                     "xnorm": xnorm,
@@ -491,33 +471,17 @@ class MazeExplorer:
                     "dist_m": round(distance_m, 3),
                     "ts": datetime.now().isoformat(timespec="seconds"),
                     "gimbal_yaw_deg": round(gimbal_yaw_deg, 2),
-                    "robot_yaw_deg": round(robot_yaw_deg, 2),
+                    "robot_yaw_deg": round(robot_yaw_deg, 2)
                 }
 
-                # รวม/สร้างใหม่แทนการ append ตรง ๆ
                 action = self._upsert_marker(label, mx, my, meta)
-
-                # log แถว CSV (raw trace)
-                self.marker_log.append({
-                    "ts": meta["ts"],
-                    "name": label,
-                    "mx": round(mx, 4),
-                    "my": round(my, 4),
-                    "dist_m": meta["dist_m"],
-                    "xnorm": round(xnorm, 4),
-                    "bearing_deg": meta["bearing_deg"],
-                    "robot_yaw_deg": meta["robot_yaw_deg"],
-                    "gimbal_yaw_deg": meta["gimbal_yaw_deg"],
-                    "action": action
-                })
-
-                print(f"[MARKER] '{label}' -> {action}: mx={mx:.2f}, my={my:.2f}, "
-                      f"xnorm={xnorm:.2f}, dist={distance_m:.2f}m, bearing={bearing_deg:.1f}°")
+                self.marker_log.append({**meta, "name": label, "mx": round(mx, 4), "my": round(my, 4), "action": action})
+                print(f"[MARKER] '{label}' -> mx={mx:.2f}, my={my:.2f}, dist={distance_m:.2f}m ({action})")
         except Exception as e:
             print(f"[MazeExplorer.on_markers_update] error: {e}")
 
     # ------------------------------------------------------------------------
-    # บันทึก CSV
+    # บันทึก CSV (รวมให้เหลือฟังก์ชันเดียว)
     def save_csv_logs(self):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -538,7 +502,8 @@ class MazeExplorer:
             with open(f"scan_log_{ts}.csv", "w", newline='', encoding="utf-8") as f:
                 w = csv.DictWriter(f, fieldnames=["ts","grid_x","grid_y","N_mm","E_mm","S_mm","W_mm"])
                 w.writeheader()
-                for r in self.scan_log: w.writerow(r)
+                for r in self.scan_log:
+                    w.writerow(r)
 
         if self.wall_log:
             with open(f"walls_log_{ts}.csv", "w", newline='', encoding="utf-8") as f:
@@ -553,7 +518,6 @@ class MazeExplorer:
                 w = csv.DictWriter(f, fieldnames=fieldnames)
                 w.writeheader()
                 for r in self.marker_log:
-                    # ถ้ามาจากสถานะเก่าไม่มีคอลัมน์ครบ เติม None
                     for k in fieldnames:
                         if k not in r:
                             r[k] = None
@@ -592,18 +556,15 @@ class MazeExplorer:
             elif scan_direction == 3: neighbor_pos = (x - 1, y)
 
             print(f"   Scanning new area in direction: {ORIENTATIONS[scan_direction]}...")
-            # คำนวณ yaw ศูนย์สำหรับกำแพงนี้
             angle_to_turn_gimbal = (scan_direction - self.current_orientation) * 90
             if angle_to_turn_gimbal > 180: angle_to_turn_gimbal -= 360
             if angle_to_turn_gimbal < -180: angle_to_turn_gimbal += 360
             self._sweep_center_deg = angle_to_turn_gimbal
 
-            # หันไปที่ศูนย์, ลด pitch เพื่อส่องกำแพง
             self.ep_gimbal.moveto(yaw=angle_to_turn_gimbal, pitch=-15,
                                   yaw_speed=GIMBAL_TURN_SPEED, pitch_speed=GIMBAL_TURN_SPEED).wait_for_completed()
             time.sleep(0.4)
 
-            # วัดระยะ ToF
             distance_mm = self.tof_handler.get_distance()
             print(f"         - ToF distance: {distance_mm} mm")
             wall_distances[f'{scan_direction}'] = distance_mm
@@ -612,7 +573,6 @@ class MazeExplorer:
                 if neighbor_pos[0] >= 0 and neighbor_pos[1] >= 0 and neighbor_pos[0] < self.border[0] and neighbor_pos[1] < self.border[1]:
                     self._add_connection(self.current_position, neighbor_pos)
                     print(f"           - Open path recorded at {neighbor_pos}.")
-                    # กวาดมุมเล็กน้อยเพื่อพยายามจับ marker ไกล ๆ
                     for off in [-20, 0, 20]:
                         self.ep_gimbal.moveto(yaw=angle_to_turn_gimbal+off, pitch=-15,
                                               yaw_speed=60, pitch_speed=GIMBAL_TURN_SPEED).wait_for_completed()
@@ -620,7 +580,6 @@ class MazeExplorer:
                 continue
             else:
                 print(f"           - Wall detected at {distance_mm}mm. Preparing to scan for markers.")
-                # เข้าใกล้เล็กน้อยเพื่ออ่าน marker ชัดขึ้น
                 move_dist_m = (distance_mm / 1000.0) - 0.20
                 relative_direction = (scan_direction - self.current_orientation + 4) % 4
                 self._add_blocked(self.current_position, neighbor_pos)
@@ -641,17 +600,14 @@ class MazeExplorer:
                     self.ep_chassis.move(x=move_x, y=move_y, z=0, xy_speed=2.0).wait_for_completed()
                 time.sleep(0.2)
 
-                # กวาดซ้าย/ขวาเล็กน้อยเพื่อหา marker
                 for off in [-30, 0, 30]:
                     self.ep_gimbal.moveto(yaw=angle_to_turn_gimbal+off, pitch=-15,
                                           yaw_speed=60, pitch_speed=GIMBAL_TURN_SPEED).wait_for_completed()
-                    time.sleep(0.25)  # รอ vision callback อัปเดต
+                    time.sleep(0.25)
 
-        # กลับศูนย์
         self.ep_gimbal.moveto(yaw=0, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
         print("Scan complete. Gimbal recentered.")
 
-        # เก็บ scan_log ต่อกริด
         def pick(d, k):
             return d.get(k, None)
         self.scan_log.append({
@@ -878,7 +834,7 @@ def plot_map_with_walls(graph, blocked, path, marker_map, filename="maze_map.png
         plt.scatter(px[0], py[0], s=120, color="green", marker='o', zorder=5, label='Start')
         plt.scatter(px[-1], py[-1], s=120, color="purple", marker='X', zorder=5, label='End')
 
-    # Markers: วางตาม (mx,my) จริง (หน่วยกริด)
+    # Markers
     for name, hits in (marker_map or {}).items():
         for (mx, my), meta in hits:
             plt.scatter([mx], [my], s=60, marker='o', color="red", zorder=6)
@@ -910,14 +866,13 @@ if __name__ == '__main__':
         tof_handler = TofDataHandler()
         vision_handler = VisionDataHandler()
         ep_vision = ep_robot.vision
-        ep_camera = ep_robot.camera
         pose_handler = PoseDataHandler()
         gimbal_handler = GimbalAngleHandler()
 
-        ep_camera.start_video_stream(display=True, resolution=camera.STREAM_360P)
         ep_robot.sensor.sub_distance(freq=10, callback=tof_handler.update)
         ep_robot.chassis.sub_position(freq=10, callback=pose_handler.update_position)
         ep_robot.chassis.sub_attitude(freq=10, callback=pose_handler.update_attitude)
+        # ใช้เฉพาะ vision (ไม่ต้องใช้ camera stream)
         ep_robot.vision.sub_detect_info(name="marker", callback=vision_handler.update)
         ep_robot.gimbal.sub_angle(freq=10, callback=gimbal_handler.update)
 

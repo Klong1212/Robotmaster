@@ -53,15 +53,15 @@ def _esc_listener():
 # ==============================================================================
 # การตั้งค่าและค่าคงที่ (Constants)
 # ==============================================================================
-GRID_SIZE_M = 0.6
-DEDUPE_ALONG_WALL_M = 0.20     # ระยะตามแนวกำแพงที่ถือว่า "ใกล้กัน" (ลดจาก 1 grid เหลือ 20 ซม.)
+GRID_SIZE_M = 0.635
+DEDUPE_ALONG_WALL_M = 0.45     # ระยะตามแนวกำแพงที่ถือว่า "ใกล้กัน" (ลดจาก 1 grid เหลือ 20 ซม.)
 DEDUPE_OFFSET_TOL_M = 0.10     # ความคลาดเคลื่อน offset ซ้าย/ขวาบนกำแพงที่ยอมรับได้
 CORNER_DEDUPE_TOL_M = 0.15   # ระยะยูคลิดระหว่างสอง detection ที่ "มุมเดียวกัน" (<= นี้ให้ถือว่าซ้ำ)
 WALL_THRESHOLD_MM = 500
 VISION_SCAN_DURATION_S = 1
-GIMBAL_TURN_SPEED = 450
+GIMBAL_TURN_SPEED = 360
 CAMERA_HORIZONTAL_FOV = 96    # <<< ใช้คำนวณ offset จากตำแหน่งในภาพ
-GIMBAL_SWEEP_OFFSETS = [0, -40, +40]  # <<< กวาดหามาร์กเกอร์ 3 มุม (ศูนย์/ซ้าย/ขวา)
+GIMBAL_SWEEP_OFFSETS = [0, -30, +30]  # <<< กวาดหามาร์กเกอร์ 3 มุม (ศูนย์/ซ้าย/ขวา)
 ORIENTATIONS = {0: "North", 1: "East", 2: "South", 3: "West"}
 WALL_NAMES = {0: "North Wall", 1: "East Wall", 2: "South Wall", 3: "West Wall"} 
 
@@ -360,7 +360,7 @@ class MazeExplorer:
         self.gimbal_handler = gimbal_handler
         self.pose_handler = pose_handler
 
-        self.current_position = (0, 0)
+        self.current_position = (3, 0)
         self.current_orientation = 0 # 0:N, 1:E, 2:S, 3:W
         self.internal_map = RobotMap()
 
@@ -370,7 +370,7 @@ class MazeExplorer:
         self.visited_path = [self.current_position]
         self.step_counter = 0  # <<< นับจำนวนช่องที่เดิน เพื่อ trig ทุกๆ 2 ช่อง
         self.ep_led.set_led(r=0, g=0, b=255)
-        self.border=(2,2)
+        self.border=(7,7)
 
         # Reset pose at the beginning
         self.pose_handler.set_xy(0.0, 0.0)
@@ -758,11 +758,9 @@ class MazeExplorer:
                                   yaw_speed=GIMBAL_TURN_SPEED, pitch_speed=GIMBAL_TURN_SPEED
                                   ).wait_for_completed()
             time.sleep(0.5)  # ให้เวลา set ตัว
-            self.ep_gimbal.moveto(yaw=angle_to_turn_gimbal, pitch=-15,
-                                  yaw_speed=GIMBAL_TURN_SPEED, pitch_speed=GIMBAL_TURN_SPEED
-                                  ).wait_for_completed()
 
-            time.sleep(0.3)
+
+
             distance_mm = self.tof_handler.get_distance()
             print(f"         - ToF distance: {distance_mm:.1f} mm")
             wall_distances[f'{scan_direction}'] = distance_mm
@@ -779,8 +777,8 @@ class MazeExplorer:
             self.wall_log.add(tuple(sorted([self.current_position, neighbor_pos])))
 
             # เข้า/ออกให้ clearance ~0.20m สำหรับสแกนชัดขึ้น
-            move_dist_m = (distance_mm / 1000.0) - 0.20
-            move_dist_m_y = (distance_mm / 1000.0) - 0.20
+            move_dist_m = (distance_mm / 1000.0) - 0.175
+            move_dist_m_y = (distance_mm / 1000.0) - 0.175
             relative_direction = (scan_direction - self.current_orientation + 4) % 4
 
             move_x, move_y = 0.0, 0.0
@@ -795,7 +793,7 @@ class MazeExplorer:
 
             if abs(move_dist_m) > 0.01:
                 print(f"             Adjusting position: move x={move_x:.2f}m, y={move_y:.2f}m.")
-                self.ep_chassis.move(x=move_x, y=move_y, z=0, xy_speed=2.5).wait_for_completed()
+                self.ep_chassis.move(x=move_x, y=move_y, z=0, xy_speed=1).wait_for_completed()
             else:
                 print("             Position is good, no adjustment needed for scan.")
             time.sleep(0.2)
@@ -803,13 +801,13 @@ class MazeExplorer:
             # สแกนหา marker ที่ yaw 0/-30/+30 (อิง angle_to_turn_gimbal)
             detected_any = False
             for i, delta in enumerate(GIMBAL_SWEEP_OFFSETS):
-                tof_now = self.tof_handler.get_distance()
-                time.sleep(0.2)
+
                 target_yaw = angle_to_turn_gimbal + delta
-                self.ep_gimbal.moveto(yaw=target_yaw, pitch=-15,
+                self.ep_gimbal.moveto(yaw=target_yaw, pitch=0,
                                       yaw_speed=GIMBAL_TURN_SPEED, pitch_speed=GIMBAL_TURN_SPEED
                                       ).wait_for_completed()
-                time.sleep(0.2)
+                time.sleep(0.5)
+                tof_now = self.tof_handler.get_distance()
 
                 detections = self.vision_handler.get_markers()  # [(label, x)]
                 if detections:
@@ -856,9 +854,6 @@ class MazeExplorer:
 
             self.ep_gimbal.moveto(yaw=angle_to_turn_gimbal, pitch=0,
                                   yaw_speed=GIMBAL_TURN_SPEED,pitch_speed=GIMBAL_TURN_SPEED).wait_for_completed()
-            time.sleep(0.5)
-            self.ep_gimbal.moveto(yaw=angle_to_turn_gimbal, pitch=-15,
-                                  yaw_speed=GIMBAL_TURN_SPEED,pitch_speed=GIMBAL_TURN_SPEED).wait_for_completed()
 
             time.sleep(0.5)
             distance_mm = self.tof_handler.get_distance()
@@ -879,7 +874,7 @@ class MazeExplorer:
                 elif relative_direction == 3:  # ซ้าย
                     move_y = -move_dist_m
 
-                if abs(move_dist_m) > 0.05:
+                if abs(move_dist_m) > 0.01:
                     print(f"             Adjusting position: move x={move_x:.2f}m, y={move_y:.2f}m.")
                     self.ep_chassis.move(x=move_x, y=move_y, z=0, xy_speed=0.3).wait_for_completed()
                 else:
@@ -889,14 +884,18 @@ class MazeExplorer:
                 self.ep_chassis.drive_speed(x=0, y=0, z=0, timeout=0.1)
 
     # ==================== (อย่าแก้) การเคลื่อนที่/หมุน PID ====================
-    def move_forward_pid(self, distance_m, speed_limit=5):
+    def move_forward_pid(self, distance_m, speed_limit=0.6):
         print(f"   PID Move: Moving forward {distance_m}m.")
-        pid = PIDController(Kp=2, Ki=0.2, Kd=0.25, setpoint=distance_m, output_limits=(-speed_limit, speed_limit))
+        pid = PIDController(Kp=2, Ki=0.02, Kd=0.1, setpoint=distance_m, output_limits=(-speed_limit, speed_limit))
         start_x, start_y, _, _, _, _ = self.pose_handler.get_pose()
+        self
         while True:
             curr_x, curr_y, _, _, _, _ = self.pose_handler.get_pose()
             dist_traveled = math.hypot(curr_x - start_x, curr_y - start_y)
             if abs(distance_m - dist_traveled) < 0.01: break
+            if  self.tof_handler.get_distance()<280:
+                self.ep_chassis.drive_speed(x=0, y=0, z=0, timeout=0.1)
+                break
             vx_speed = pid.update(dist_traveled)
             self.ep_chassis.drive_speed(x=vx_speed, y=0, z=0, timeout=0.1)
             time.sleep(0.01)
@@ -911,9 +910,9 @@ class MazeExplorer:
             "grid_x": gx, "grid_y": gy, "yaw": yaw
         })
 
-    def turn_pid(self, target_angle, speed_limit=120):
+    def turn_pid(self, target_angle, speed_limit=90):
         print(f"   PID Turn: Turning to {target_angle} degrees.")
-        pid = PIDController(Kp=2.5, Ki=0, Kd=0.05, setpoint=0, output_limits=(-speed_limit, speed_limit))
+        pid = PIDController(Kp=2.5, Ki=0, Kd=0.15, setpoint=0, output_limits=(-speed_limit, speed_limit))
         while True:
             _, _, _, current_yaw, _, _ = self.pose_handler.get_pose()
             error = target_angle - current_yaw
@@ -1064,13 +1063,13 @@ def plot_map_with_walls(graph, blocked, path, marker_map, filename="maze_map.png
             offset = finding['offset_m'] / GRID_SIZE_M  # แปลงเป็นหน่วยเซลล์
 
             if wall == "North Wall":
-                mx, my = gx - offset, gy + 0.5
+                mx, my = gx - offset, gy + 0.4
             elif wall == "East Wall":
-                mx, my = gx + 0.5, gy + offset
+                mx, my = gx + 0.4, gy + offset
             elif wall == "South Wall":
-                mx, my = gx + offset, gy - 0.5
+                mx, my = gx + offset, gy - 0.4
             elif wall == "West Wall":
-                mx, my = gx - 0.5, gy - offset
+                mx, my = gx - 0.4, gy - offset
             else:
                 mx, my = gx, gy
 
