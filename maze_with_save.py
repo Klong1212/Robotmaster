@@ -645,7 +645,7 @@ class MazeExplorer:
     # <--- ลำดับการทำงานใน run_mission (เดิม) --->
     def run_mission(self):
         start_time = time.time()
-        time_limit_seconds = 600
+        time_limit_seconds = 900
         print(f"Mission started! Time limit: {time_limit_seconds} seconds.")
         
         self.ep_gimbal.moveto(yaw=0, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
