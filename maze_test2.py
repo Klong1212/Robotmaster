@@ -53,18 +53,17 @@ def _esc_listener():
 # ==============================================================================
 # การตั้งค่าและค่าคงที่ (Constants)
 # ==============================================================================
-GRID_SIZE_M = 0.635
-# --- Dedupe thresholds (meters) ---
+GRID_SIZE_M = 0.6
 DEDUPE_ALONG_WALL_M = 0.20     # ระยะตามแนวกำแพงที่ถือว่า "ใกล้กัน" (ลดจาก 1 grid เหลือ 20 ซม.)
 DEDUPE_OFFSET_TOL_M = 0.10     # ความคลาดเคลื่อน offset ซ้าย/ขวาบนกำแพงที่ยอมรับได้
+CORNER_DEDUPE_TOL_M = 0.15   # ระยะยูคลิดระหว่างสอง detection ที่ "มุมเดียวกัน" (<= นี้ให้ถือว่าซ้ำ)
 WALL_THRESHOLD_MM = 500
 VISION_SCAN_DURATION_S = 1
 GIMBAL_TURN_SPEED = 450
-CAMERA_HORIZONTAL_FOV = 120.0      # <<< ใช้คำนวณ offset จากตำแหน่งในภาพ
-GIMBAL_SWEEP_OFFSETS = [0, -30, +30]  # <<< กวาดหามาร์กเกอร์ 3 มุม (ศูนย์/ซ้าย/ขวา)
-
+CAMERA_HORIZONTAL_FOV = 96    # <<< ใช้คำนวณ offset จากตำแหน่งในภาพ
+GIMBAL_SWEEP_OFFSETS = [0, -40, +40]  # <<< กวาดหามาร์กเกอร์ 3 มุม (ศูนย์/ซ้าย/ขวา)
 ORIENTATIONS = {0: "North", 1: "East", 2: "South", 3: "West"}
-WALL_NAMES = {0: "North Wall", 1: "East Wall", 2: "South Wall", 3: "West Wall"}  # <<< CHANGED (พิมพ์ตก)
+WALL_NAMES = {0: "North Wall", 1: "East Wall", 2: "South Wall", 3: "West Wall"} 
 
 # ==============================================================================
 # Angle helpers (สำคัญมากสำหรับไม่ให้มุมสลับซ้าย/ขวา)
@@ -387,6 +386,43 @@ class MazeExplorer:
         self.continuous_sensor_log = []
         self._logging_thread = None
         self._logging_thread_active = False
+    def _corner_dedupe_cross_wall(self,
+                                marker_name: str,
+                                wall_name: str,
+                                grid_pos: tuple,
+                                offset_m: float,
+                                tol_m: float = CORNER_DEDUPE_TOL_M) -> bool:
+        """
+        กันซ้ำแบบ 'corner-aware':
+        - ถ้าชื่อเดียวกัน แต่ 'กำแพงคนละด้าน' ที่ 'ตั้งฉากกัน'
+        - และตำแหน่งจริง (เมตร) ของมาร์กเกอร์สองอัน 'อยู่ใกล้มุมเดียวกัน' (ระยะยูคลิด <= tol_m)
+        ก็ถือว่าซ้ำ (ข้ามผนังได้)
+
+        หมายเหตุ:
+        - ครอบคลุมทั้งกรณีคนละกริดแต่แชร์มุมเดียวกัน (เพราะเทียบพิกัดโลกเป็นเมตร)
+        """
+        if marker_name not in self.marker_map:
+            return False
+
+        # พิกัดของ detection ปัจจุบัน (เมตร)
+        cur_xy_m = self._marker_point_meters(wall_name, grid_pos, float(offset_m))
+
+        for ex in self.marker_map[marker_name]:
+            prev_wall = ex.get("wall")
+            if not self._is_perpendicular(prev_wall, wall_name):
+                continue  # ไม่ใช่กำแพงตั้งฉาก → ไม่เข้ากฎนี้
+
+            prev_xy_m = self._marker_point_meters(prev_wall,
+                                                ex.get("grid_pos", grid_pos),
+                                                float(ex.get("offset_m", 0.0)))
+            dx = cur_xy_m[0] - prev_xy_m[0]
+            dy = cur_xy_m[1] - prev_xy_m[1]
+            dist = math.hypot(dx, dy)
+
+            if dist <= tol_m:
+                return True
+
+        return False
 
     # -------------------- Continuous Sensor Logging (NEW) --------------------
     def _continuous_log_worker(self, frequency_hz=10):
@@ -474,6 +510,36 @@ class MazeExplorer:
                 w.writerow(["step","grid_x","grid_y"])
                 for i, (gx,gy) in enumerate(self.visited_path):
                     w.writerow([i,gx,gy])
+    def _marker_point_meters(self, wall_name: str, grid_pos: tuple, offset_m: float) -> tuple:
+        """
+        คืนพิกัด (x_m, y_m) ของจุดมาร์กเกอร์บนผนัง (หน่วยเมตร)
+        สูตรเดียวกับที่ใช้วาดใน plot_map_with_walls แต่แปลงเป็นเมตร
+        """
+        gx, gy = grid_pos
+        if wall_name == "North Wall":
+            x_m = gx * GRID_SIZE_M - offset_m
+            y_m = (gy + 0.5) * GRID_SIZE_M
+        elif wall_name == "South Wall":
+            x_m = gx * GRID_SIZE_M + offset_m
+            y_m = (gy - 0.5) * GRID_SIZE_M
+        elif wall_name == "East Wall":
+            x_m = (gx + 0.5) * GRID_SIZE_M
+            y_m = gy * GRID_SIZE_M + offset_m
+        elif wall_name == "West Wall":
+            x_m = (gx - 0.5) * GRID_SIZE_M
+            y_m = gy * GRID_SIZE_M - offset_m
+        else:
+            # fallback: กลับไปที่จุดศูนย์กลางกริด
+            x_m = gx * GRID_SIZE_M
+            y_m = gy * GRID_SIZE_M
+        return (x_m, y_m)
+
+    def _is_perpendicular(self, w1: str, w2: str) -> bool:
+        """True ถ้าเป็นผนังตั้งฉากกัน (N/S กับ E/W)"""
+        ns = {"North Wall", "South Wall"}
+        ew = {"East Wall", "West Wall"}
+        return (w1 in ns and w2 in ew) or (w1 in ew and w2 in ns)
+
     def _project_along_wall_m(self, wall_name: str, grid_pos: tuple, offset_m: float) -> float:
         """
         คืนค่าพิกัดตามแนวกำแพง (เมตร) โดยรวมตำแหน่งกริด + offset_m เข้าด้วยกัน
@@ -543,51 +609,104 @@ class MazeExplorer:
     # -------------------- คำนวณมุม/offset และ log ให้ถูกข้างกำแพง --------------------
     def _log_marker_precise(self, scan_direction: int, detections: list, tof_mm_at_frame: float):
         """
-        detections: list of (label, x) จาก VisionDataHandler ณ เฟรมที่กิมบอลอยู่ที่ yaw ปัจจุบัน
-        ใช้กฎ:
-          - first-hit-wins ต่อ (marker_name, grid, wall)
-          - กันซ้ำ: ถ้าชื่อเดียวกัน + กำแพงเดียวกัน + เซลล์ติดกัน 1 กริดตามแนวกำแพง และ offset ใกล้กัน
+        บันทึกมาร์กเกอร์แบบ precise:
+        - คำนวณ offset ซ้าย/ขวาบนกำแพงจากตำแหน่งในภาพ + มุมกิมบอล + ToF ณ เฟรมเดียวกัน
+        - กันซ้ำ 3 ชั้น:
+            (A) เซลล์เดียวกัน + กำแพงเดียวกัน → ข้าม
+            (B) กำแพงเดียวกัน (แนวเดียวกัน) และตำแหน่งจริง "ตามแนวกำแพง" อยู่ใกล้กัน ≤ DEDUPE_ALONG_WALL_M
+                (และอาจพิจารณา offset ใกล้กันตาม DEDUPE_OFFSET_TOL_M)
+            (C) corner-aware: กำแพงตั้งฉากกัน และตำแหน่งโลก (เมตร) ใกล้มุมเดียวกัน ≤ CORNER_DEDUPE_TOL_M
+        Parameters
+        ----------
+        scan_direction : int
+            0=N, 1=E, 2=S, 3=W (ทิศที่กำลังสแกนเทียบ "orientation ของหุ่น")
+        detections : list[(label:str, x:float[0..1])]
+            ข้อมูลที่ VisionDataHandler คืน (มาร์กเกอร์ + ตำแหน่งแนวนอนในภาพ)
+        tof_mm_at_frame : float
+            ระยะ ToF (มม.) ณ เฟรมเดียวกันกับที่อ่าน vision ใช้คำนวณ offset
         """
         if not detections:
             return
 
         wall_name = WALL_NAMES.get(scan_direction, "Unknown Wall")
+
+        # มุมฐาน = ทิศสแกนเทียบกับ orientation ของหุ่น (ใช้เป็นแกน 0° ของกำแพงนั้น)
         base_angle_deg = _wrap_angle_deg((scan_direction - self.current_orientation) * 90.0)
 
+        # มุมกิมบอล ณ เฟรมนี้ (สำคัญเพื่อชดเชยการหันกิมบอล)
         gimbal_yaw, _ = self.gimbal_handler.get_yaw_pitch()
         gimbal_yaw = _wrap_angle_deg(gimbal_yaw)
 
         for (marker_name, x_coord) in detections:
-            # คำนวณมุม offset จากตำแหน่งในภาพ (ซ้าย=+, ขวา=-)
+            # 1) คำนวณมุม offset จากตำแหน่งในภาพ (ซ้าย=+ ขวา=-) ด้วย FOV กล้อง
             angular_offset = (0.5 - float(x_coord)) * CAMERA_HORIZONTAL_FOV
+
+            # 2) มุมจริงของ marker = มุมกิมบอล + มุมเยื้องในภาพ
             true_marker_angle = _wrap_angle_deg(gimbal_yaw + angular_offset)
+
+            # 3) มุมสัมพัทธ์เทียบกับแกนกำแพง (ซ้ายบวก/ขวาลบ)
             relative_angle_deg = sub_angle(true_marker_angle, base_angle_deg)
 
+            # 4) Offset บนกำแพง (เมตร) = ระยะฉาก × sin(มุมสัมพัทธ์)
             offset_m = (float(tof_mm_at_frame) / 1000.0) * math.sin(math.radians(relative_angle_deg))
             side = "LEFT(+)" if offset_m > 0 else ("RIGHT(-)" if offset_m < 0 else "CENTER")
-            print(f"             -> Marker '{marker_name}' x={x_coord:.3f} "
-                  f"gYaw={gimbal_yaw:+.1f}° off={angular_offset:+.1f}° "
-                  f"base={base_angle_deg:+.1f}° rel={relative_angle_deg:+.1f}° "
-                  f"offset={offset_m:+.3f} m [{side}]")
 
-            finding = {"grid_pos": self.current_position, "wall": wall_name, "offset_m": round(offset_m, 4)}
+            print(
+                f"             -> Marker '{marker_name}' x={x_coord:.3f} "
+                f"gYaw={gimbal_yaw:+.1f}° off={angular_offset:+.1f}° "
+                f"base={base_angle_deg:+.1f}° rel={relative_angle_deg:+.1f}° "
+                f"offset={offset_m:+.3f} m [{side}]"
+            )
+
+            # โครงสร้างข้อมูลที่จะบันทึก
+            finding = {
+                "grid_pos": self.current_position,   # (gx, gy)
+                "wall": wall_name,                   # "North Wall" | ...
+                "offset_m": round(offset_m, 4)       # เก็บทศนิยมสั้นลงเพื่อกันสั่น
+            }
+
             if marker_name not in self.marker_map:
                 self.marker_map[marker_name] = []
 
-            # (A) กันซ้ำใน cell เดิม + กำแพงเดียวกัน
+            # ---------------- DEDUPE (A): เซลล์เดิม + กำแพงเดียวกัน ----------------
             already_same_cell = any(
                 (f["grid_pos"] == finding["grid_pos"] and f["wall"] == finding["wall"])
                 for f in self.marker_map[marker_name]
             )
             if already_same_cell:
+                # เคยบันทึกชื่อเดียวกันบนกำแพงเดียวกันของ cell นี้แล้ว
                 continue
 
-            # (B) กันซ้ำ: ชื่อเดียวกัน + กำแพงเดียวกัน + ห่างกัน 1 กริดตามแนวกำแพงเดียวกัน
-            if self._same_wall_adjacent_already(marker_name, wall_name, self.current_position, finding["offset_m"]):
-                print(f"             !!! SKIP DUP: '{marker_name}' on {wall_name} (≤ {DEDUPE_ALONG_WALL_M:.2f} m along-wall).")
+            # ---------------- DEDUPE (B): กำแพงเดียวกัน (แนวเดียวกัน) ----------------
+            # ใช้ระยะจริง "ตามแนวกำแพง" (เมตร) ≤ DEDUPE_ALONG_WALL_M
+            # เสริมด้วย offset tolerance (DEDUPE_OFFSET_TOL_M) ถ้าตั้งไว้
+            if self._same_wall_adjacent_already(
+                marker_name,
+                wall_name,
+                self.current_position,
+                finding["offset_m"]
+            ):
+                print(
+                    f"             !!! SKIP DUP (same wall): '{marker_name}' "
+                    f"≤ {DEDUPE_ALONG_WALL_M:.2f} m along-wall."
+                )
                 continue
 
-            # ผ่านทั้ง (A) และ (B) -> บันทึก
+            # ---------------- DEDUPE (C): corner-aware (ข้ามกำแพงตั้งฉาก) ------------
+            # ถ้าชื่อเดียวกัน แต่คนละกำแพงที่ตั้งฉาก และตำแหน่งโลก (เมตร) ใกล้มุมเดียวกัน
+            if self._corner_dedupe_cross_wall(
+                marker_name,
+                wall_name,
+                self.current_position,
+                finding["offset_m"]
+            ):
+                print(
+                    f"             !!! SKIP DUP (corner-aware): '{marker_name}' "
+                    f"within {CORNER_DEDUPE_TOL_M:.2f} m of corner across walls."
+                )
+                continue
+
+            # ---------------- ผ่านทุกเกณฑ์ dedupe → LOG จริง ----------------
             self.marker_map[marker_name].append(finding)
             self.marker_log.append({
                 "ts": datetime.now().isoformat(timespec="seconds"),
@@ -597,8 +716,11 @@ class MazeExplorer:
                 "wall": wall_name,
                 "offset_m": finding["offset_m"]
             })
-            print(f"             !!! Marker LOGGED: '{marker_name}' at Grid {finding['grid_pos']} "
-                  f"on the {finding['wall']} (offset {finding['offset_m']:+.3f} m)")
+            print(
+                f"             !!! Marker LOGGED: '{marker_name}' at Grid {finding['grid_pos']} "
+                f"on the {finding['wall']} (offset {finding['offset_m']:+.3f} m)"
+            )
+
 
     # <--- ฟังก์ชันนี้จะคืนค่าระยะทางที่วัดได้ --->
     def scan_surroundings_with_gimbal(self, previous_position=None):
@@ -789,7 +911,7 @@ class MazeExplorer:
             "grid_x": gx, "grid_y": gy, "yaw": yaw
         })
 
-    def turn_pid(self, target_angle, speed_limit=180):
+    def turn_pid(self, target_angle, speed_limit=120):
         print(f"   PID Turn: Turning to {target_angle} degrees.")
         pid = PIDController(Kp=2.5, Ki=0, Kd=0.05, setpoint=0, output_limits=(-speed_limit, speed_limit))
         while True:
