@@ -359,8 +359,8 @@ class MazeExplorer:
         self.vision_handler = vision_handler
         self.gimbal_handler = gimbal_handler
         self.pose_handler = pose_handler
-
-        self.current_position = (3, 0)
+        self.visited_for_check = []
+        self.current_position = (2, 0)
         self.current_orientation = 0 # 0:N, 1:E, 2:S, 3:W
         self.internal_map = RobotMap()
 
@@ -370,7 +370,7 @@ class MazeExplorer:
         self.visited_path = [self.current_position]
         self.step_counter = 0  # <<< นับจำนวนช่องที่เดิน เพื่อ trig ทุกๆ 2 ช่อง
         self.ep_led.set_led(r=0, g=0, b=255)
-        self.border=(7,7)
+        self.border=(3,4)
 
         # Reset pose at the beginning
         self.pose_handler.set_xy(0.0, 0.0)
@@ -930,13 +930,11 @@ class MazeExplorer:
         if not path or len(path) < 2: return
         print(f"Executing path with PID: {path}")
         self.ep_led.set_led(r=0, g=0, b=255)
-        num=1
         for i in range(len(path) - 1):
-            print(self.current_position in self.internal_map.explored , num % 2)
-            if self.current_position in self.internal_map.explored and num % 2 == 0:
+            if self.current_position in self.visited_for_check:
                 self.periodic_wall_clearance_adjust(target_clearance_m=0.18)
                 print(f"\nPosition {self.current_position} already explored. Skipping scan.")
-            num+=1
+            self.visited_for_check.append(self.current_position)
             start_node, end_node = path[i], path[i+1]
             dx, dy = end_node[0] - start_node[0], end_node[1] - start_node[1]
             target_orientation = -1
