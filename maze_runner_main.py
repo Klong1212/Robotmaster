@@ -370,7 +370,7 @@ class MazeExplorer:
         self.visited_path = [self.current_position]
         self.step_counter = 0  # <<< นับจำนวนช่องที่เดิน เพื่อ trig ทุกๆ 2 ช่อง
         self.ep_led.set_led(r=0, g=0, b=255)
-        self.border=(3,4)
+        self.border=(7,7)
 
         # Reset pose at the beginning
         self.pose_handler.set_xy(0.0, 0.0)
@@ -791,7 +791,7 @@ class MazeExplorer:
             elif relative_direction == 3:  # ซ้าย
                 move_y = -move_dist_m
 
-            if abs(move_dist_m) > 0.01:
+            if abs(move_dist_m) > 0.025: #punpun
                 print(f"             Adjusting position: move x={move_x:.2f}m, y={move_y:.2f}m.")
                 self.ep_chassis.move(x=move_x, y=move_y, z=0, xy_speed=1).wait_for_completed()
             else:
@@ -874,7 +874,7 @@ class MazeExplorer:
                 elif relative_direction == 3:  # ซ้าย
                     move_y = -move_dist_m
 
-                if abs(move_dist_m) > 0.01:
+                if abs(move_dist_m) > 0.025: #punpun
                     print(f"             Adjusting position: move x={move_x:.2f}m, y={move_y:.2f}m.")
                     self.ep_chassis.move(x=move_x, y=move_y, z=0, xy_speed=0.3).wait_for_completed()
                 else:
@@ -893,7 +893,7 @@ class MazeExplorer:
             curr_x, curr_y, _, _, _, _ = self.pose_handler.get_pose()
             dist_traveled = math.hypot(curr_x - start_x, curr_y - start_y)
             if abs(distance_m - dist_traveled) < 0.01: break
-            if  self.tof_handler.get_distance()<280:
+            if  self.tof_handler.get_distance()<=280:
                 self.ep_chassis.drive_speed(x=0, y=0, z=0, timeout=0.1)
                 break
             vx_speed = pid.update(dist_traveled)
