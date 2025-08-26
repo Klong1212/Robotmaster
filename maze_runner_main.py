@@ -874,7 +874,7 @@ class MazeExplorer:
                 elif relative_direction == 3:  # ซ้าย
                     move_y = -move_dist_m
 
-                if abs(move_dist_m) > 0.025: #punpun
+                if abs(move_dist_m) > 0.025: 
                     print(f"             Adjusting position: move x={move_x:.2f}m, y={move_y:.2f}m.")
                     self.ep_chassis.move(x=move_x, y=move_y, z=0, xy_speed=0.3).wait_for_completed()
                 else:
@@ -888,7 +888,6 @@ class MazeExplorer:
         print(f"   PID Move: Moving forward {distance_m}m.")
         pid = PIDController(Kp=2, Ki=0.02, Kd=0.1, setpoint=distance_m, output_limits=(-speed_limit, speed_limit))
         start_x, start_y, _, _, _, _ = self.pose_handler.get_pose()
-        self
         while True:
             curr_x, curr_y, _, _, _, _ = self.pose_handler.get_pose()
             dist_traveled = math.hypot(curr_x - start_x, curr_y - start_y)
@@ -958,7 +957,7 @@ class MazeExplorer:
             self.pose_handler.set_xy(end_node[0] * GRID_SIZE_M, end_node[1] * GRID_SIZE_M)
             self.pose_handler.set_yaw(target_angle)
             time.sleep(0.2)
-            _autosave(self)  # <<< NEW: autosave เมื่อถึงกริดใหม่
+            _autosave(self)  
             print("end++++++++++++++++++++++++++++++++++++++++++++++++++")
 
     # <--- ลำดับการทำงานใน run_mission --->

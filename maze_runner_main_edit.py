@@ -594,7 +594,7 @@ class MazeExplorer:
                 return self.internal_map.get_path(self.current_position, pos)
         return None
 
-    def periodic_wall_clearance_adjust(self, target_clearance_m=0.18):
+    def periodic_wall_clearance_adjust(self, target_clearance_m=0.175):
         for scan_direction in range(4):
             print(f"   Scanning new area in direction: {ORIENTATIONS[scan_direction]}...")
             angle_to_turn_gimbal = (scan_direction - self.current_orientation) * 90
