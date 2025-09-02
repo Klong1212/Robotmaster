@@ -2,46 +2,46 @@ import robomaster
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
+import os, tempfile, time
+
 def detect_red_object(img_read):
-    img = cv2.imread(img_read)  #โหลดภาพ
-    image_hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV) #แปลงเป็นHSV
-    h,s,v=cv2.split(image_hsv) #แยกHSV เป็น hue saturation value
-    h_blur = cv2.GaussianBlur(h, (7, 7), 0) #เลือกh มาเบลอเพื่อลดnoise
+    img_hsv = cv2.cvtColor(img_read, cv2.COLOR_BGR2HSV) # แปลงเป็น HSV
+    h,s,v=cv2.split(img_hsv) # แยก HSV
 
-    img_binary = ((h_blur > 0) & (h_blur < 10)) | ((h_blur > 140) & (h_blur < 180)) #ทำเป็นbinary โดยกำหนดสีที่ต้องการเป็นสีแดง
+    img_binary = ((h > 0) & (h < 10)) | ((h > 140) & (h < 180)) # ทำเป็น binary
 
-    templat1=cv2.imread("bounding_box_1.jpg") #โหลดภาพ
-    template_hsv=cv2.cvtColor(templat1,cv2.COLOR_BGR2HSV) #แปลงเป็นHSV
-    template_h,template_s,template_v_1=cv2.split(template_hsv) #แยกHSV เป็น hue saturation value
-    template_binary1 = (template_v_1 > 100) #สร้างmask
- 
+    templat1=cv2.imread(r"find_coke\bounding_box_1.jpg") # โหลดภาพ
+    template_hsv=cv2.cvtColor(templat1,cv2.COLOR_BGR2HSV) # แปลงเป็น HSV
+    template_h,template_s,template_v_1=cv2.split(template_hsv) # แยก HSV
+    template_binary1 = (template_v_1 > 100) # สร้าง mask
 
-    templat2=cv2.imread("bounding_box_2.jpg") #โหลดภาพ
-    template_hsv=cv2.cvtColor(templat2,cv2.COLOR_BGR2HSV) #แปลงเป็นHSV
-    template_h,template_s,template_v_2=cv2.split(template_hsv) #แยกHSV เป็น hue saturation value
-    template_binary2 = (template_v_2 > 100) #สร้างmask
+    templat2=cv2.imread(r"find_coke\bounding_box_2.jpg") # โหลดภาพ
+    template_hsv=cv2.cvtColor(templat2,cv2.COLOR_BGR2HSV) # แปลงเป็น HSV
+    template_h,template_s,template_v_2=cv2.split(template_hsv) # แยก HSV
+    template_binary2 = (template_v_2 > 100) # สร้าง mask
 
+    templat3=cv2.imread(r"find_coke\bounding_box_3.jpg") # โหลดภาพ
+    template_hsv=cv2.cvtColor(templat3,cv2.COLOR_BGR2HSV) # แปลงเป็น HSV
+    template_h,template_s,template_v_3=cv2.split(template_hsv) # แยก HSV
+    template_binary3 = (template_v_3 > 100) # สร้าง mask
 
-    templat3=cv2.imread("bounding_box_3.jpg") #โหลดภาพ
-    template_hsv=cv2.cvtColor(templat3,cv2.COLOR_BGR2HSV) #แปลงเป็นHSV
-    template_h,template_s,template_v_3=cv2.split(template_hsv) #แยกHSV เป็น hue saturation value
-    template_binary3 = (template_v_3 > 100) #สร้างmask
-
-    #เปลี่ยนเป็น uint8 เพื่อให้ สามารถใช้ cv2.matchTemplate ได้ โดยการ*255เพื่อปรับให้ 0(ขาว),255(ดำ) 
+    # เปลี่ยนเป็น uint8
     img_binary_uint8 = img_binary.astype(np.uint8) * 255
     template_binary_uint8_1 = template_binary1.astype(np.uint8) * 255
     template_binary_uint8_2 = template_binary2.astype(np.uint8) * 255
     template_binary_uint8_3 = template_binary3.astype(np.uint8) * 255
-    #จับคู่ภาพกับtemplate โดยเลือกtemplate
+
+    # จับคู่ภาพกับ template
     value = cv2.matchTemplate(img_binary_uint8, template_binary_uint8_1, cv2.TM_CCOEFF_NORMED)
     value2 = cv2.matchTemplate(img_binary_uint8, template_binary_uint8_2, cv2.TM_CCOEFF_NORMED)
     value3 = cv2.matchTemplate(img_binary_uint8, template_binary_uint8_3, cv2.TM_CCOEFF_NORMED)
 
-    #หาค่าสูงสุดของแต่ละสเกล
+    # หาค่าสูงสุด
     min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(value)
     min_val2, max_val2, min_loc2, max_loc2 = cv2.minMaxLoc(value2)
     min_val3, max_val3, min_loc3, max_loc3 = cv2.minMaxLoc(value3)
-    #เลือกtemplateที่ตรงกันมากที่สุดมาแสดงผล
+
+    # เลือก template ที่ตรงกันมากที่สุด
     if max(max_val, max_val2, max_val3) == max_val:
         top_left = max_loc
         template_h, template_w = template_binary_uint8_1.shape
@@ -57,7 +57,10 @@ def detect_red_object(img_read):
         template_h, template_w = template_binary_uint8_3.shape
         max_val = max_val3
         bottom_right = (top_left[0] + template_w, top_left[1] + template_h)
-    cv2.rectangle(img, top_left, bottom_right, 255, 2) # วาดกรอบ
+
+    cv2.rectangle(img_read, top_left, bottom_right, (0, 255, 0), 2) # วาดกรอบ (สีเขียว)
+
+    return img_read, max_val # คืนค่าภาพที่วาดกรอบแล้ว
 
 # -*-coding:utf-8-*-
 # Copyright (c) 2020 DJI.
@@ -74,15 +77,12 @@ def detect_red_object(img_read):
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 import cv2
 import robomaster
 from robomaster import robot
 from robomaster import vision
 
-
 class RobotInfo:
-
     def __init__(self, x, y, w, h):
         self._x = x
         self._y = y
@@ -101,21 +101,32 @@ class RobotInfo:
     def center(self):
         return int(self._x * 1280), int(self._y * 720)
 
-
 robots = []
-
 
 if __name__ == '__main__':
     ep_robot = robot.Robot()
     ep_robot.initialize(conn_type="ap")
 
-    ep_vision = ep_robot.vision
     ep_camera = ep_robot.camera
+    ep_camera.start_video_stream(display=False, resolution='720p')  # 1080p ช้าได้
 
-    ep_camera.start_video_stream(display=False)
-    result = ep_vision.sub_detect_info(name="robot", callback=detect_red_object)
-    cv2.destroyAllWindows()
-    result = ep_vision.unsub_detect_info(name="robot")
-    cv2.destroyAllWindows()
-    ep_camera.stop_video_stream()
-    ep_robot.close()
+    print("กด Q เพื่อออก")
+    try:
+        while True:
+            frame = ep_camera.read_cv2_image(strategy="newest", timeout=0.5)
+            if frame is not None:
+                # เรียกฟังก์ชัน detect_red_object และรับภาพที่วาดกรอบแล้ว
+                frame_with_rect, max_val = detect_red_object(frame)
+
+                # แสดงผลภาพที่วาดกรอบแล้ว
+                cv2.imshow("Live (with detection)", frame_with_rect)
+                print(f"Max val: {max_val}")
+
+                if cv2.waitKey(1) & 0xFF in (ord('q'), ord('Q')):
+                    break
+            else:
+                time.sleep(0.01)
+    finally:
+        cv2.destroyAllWindows()
+        ep_camera.stop_video_stream()
+        ep_robot.close()
