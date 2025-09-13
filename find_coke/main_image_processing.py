@@ -7,20 +7,19 @@ import os, tempfile, time
 def detect_red_object(img_read):
     img_hsv = cv2.cvtColor(img_read, cv2.COLOR_BGR2HSV) # แปลงเป็น HSV
     h,s,v=cv2.split(img_hsv) # แยก HSV
+    img_binary = ((h > 30) & (h < 40)&(s > 170))# ทำเป็น binary
 
-    img_binary = ((h > 0) & (h < 10)) | ((h > 140) & (h < 180)) # ทำเป็น binary
-
-    templat1=cv2.imread(r"find_coke\bounding_box_1.jpg") # โหลดภาพ
+    templat1=cv2.imread(r"find_coke\box_1.jpg") # โหลดภาพ
     template_hsv=cv2.cvtColor(templat1,cv2.COLOR_BGR2HSV) # แปลงเป็น HSV
     template_h,template_s,template_v_1=cv2.split(template_hsv) # แยก HSV
     template_binary1 = (template_v_1 > 100) # สร้าง mask
 
-    templat2=cv2.imread(r"find_coke\bounding_box_2.jpg") # โหลดภาพ
+    templat2=cv2.imread(r"find_coke\box_2.jpg") # โหลดภาพ
     template_hsv=cv2.cvtColor(templat2,cv2.COLOR_BGR2HSV) # แปลงเป็น HSV
     template_h,template_s,template_v_2=cv2.split(template_hsv) # แยก HSV
     template_binary2 = (template_v_2 > 100) # สร้าง mask
 
-    templat3=cv2.imread(r"find_coke\bounding_box_3.jpg") # โหลดภาพ
+    templat3=cv2.imread(r"find_coke\box_3.jpg") # โหลดภาพ
     template_hsv=cv2.cvtColor(templat3,cv2.COLOR_BGR2HSV) # แปลงเป็น HSV
     template_h,template_s,template_v_3=cv2.split(template_hsv) # แยก HSV
     template_binary3 = (template_v_3 > 100) # สร้าง mask
@@ -47,20 +46,50 @@ def detect_red_object(img_read):
         template_h, template_w = template_binary_uint8_1.shape
         max_val = max_val
         bottom_right = (top_left[0] + template_w, top_left[1] + template_h)
+        template_binary_uint8=template_binary_uint8_1
     elif max(max_val, max_val2, max_val3) == max_val2:
         top_left = max_loc2
         template_h, template_w = template_binary_uint8_2.shape
         max_val = max_val2
+        template_binary_uint8=template_binary_uint8_2
         bottom_right = (top_left[0] + template_w, top_left[1] + template_h)
     else:
         top_left = max_loc3
         template_h, template_w = template_binary_uint8_3.shape
         max_val = max_val3
         bottom_right = (top_left[0] + template_w, top_left[1] + template_h)
+        template_binary_uint8=template_binary_uint8_3
 
+    # for y in range(template_h):
+    #     if np.any(template_binary_uint8[y, :] == 255):
+    #         top = y
+    #         break
+    # # หาขอบล่าง
+    # for y in range(template_h-1, -1, -1):
+    #     if np.any(template_binary_uint8[y, :] == 255):
+    #         bottom = y
+    #         break
+    # # หาขอบซ้าย
+    # for x in range(template_w):
+    #     if np.any(template_binary_uint8[:, x] == 255):
+    #         left = x
+    #         break
+    # # หาขอบขวา
+    # for x in range(template_w-1, -1, -1):
+    #     if np.any(template_binary_uint8[:, x] == 255):
+    #         right = x
+    #         break
+
+    # top_left = (max_loc[0] + left,max_loc[1] + top)
+    # bottom_right = (max_loc[0] + right, max_loc[1] + bottom)
+    # print(top,bottom,left,right)
     cv2.rectangle(img_read, top_left, bottom_right, (0, 255, 0), 2) # วาดกรอบ (สีเขียว)
-
-    return img_read, max_val # คืนค่าภาพที่วาดกรอบแล้ว
+    size_y=bottom_right[1]-top_left[1]
+    size_x=bottom_right[0]-top_left[0]
+    distance_x=671.43*5.6/size_x
+    distance_y=671.43*4.2/size_y
+    distance_avg=(distance_x+distance_y)/2
+    return img_read, max_val,distance_avg # คืนค่าภาพที่วาดกรอบแล้ว
 
 # -*-coding:utf-8-*-
 # Copyright (c) 2020 DJI.
@@ -82,24 +111,6 @@ import robomaster
 from robomaster import robot
 from robomaster import vision
 
-class RobotInfo:
-    def __init__(self, x, y, w, h):
-        self._x = x
-        self._y = y
-        self._w = w
-        self._h = h
-
-    @property
-    def pt1(self):
-        return int((self._x - self._w / 2) * 1280), int((self._y - self._h / 2) * 720)
-
-    @property
-    def pt2(self):
-        return int((self._x + self._w / 2) * 1280), int((self._y + self._h / 2) * 720)
-
-    @property
-    def center(self):
-        return int(self._x * 1280), int(self._y * 720)
 
 robots = []
 
@@ -113,14 +124,14 @@ if __name__ == '__main__':
     print("กด Q เพื่อออก")
     try:
         while True:
-            frame = ep_camera.read_cv2_image(strategy="newest", timeout=0.5)
+            frame = ep_camera.read_cv2_image(strategy="newest", timeout=2.0)
             if frame is not None:
                 # เรียกฟังก์ชัน detect_red_object และรับภาพที่วาดกรอบแล้ว
-                frame_with_rect, max_val = detect_red_object(frame)
+                frame_with_rect, max_val, distance_avg = detect_red_object(frame)
 
                 # แสดงผลภาพที่วาดกรอบแล้ว
                 cv2.imshow("Live (with detection)", frame_with_rect)
-                print(f"Max val: {max_val}")
+                print(f"Max val: {max_val}, Distance avg: {distance_avg}")
 
                 if cv2.waitKey(1) & 0xFF in (ord('q'), ord('Q')):
                     break
