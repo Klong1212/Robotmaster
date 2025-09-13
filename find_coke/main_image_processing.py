@@ -7,7 +7,7 @@ import os, tempfile, time
 def detect_red_object(img_read):
     img_hsv = cv2.cvtColor(img_read, cv2.COLOR_BGR2HSV) # แปลงเป็น HSV
     h,s,v=cv2.split(img_hsv) # แยก HSV
-    img_binary = ((h > 30) & (h < 40)&(s > 170))# ทำเป็น binary
+    img_binary = ((h > 30) & (h < 40) & (s > 170))# ทำเป็น binary
 
     templat1=cv2.imread(r"find_coke\box_1.jpg") # โหลดภาพ
     template_hsv=cv2.cvtColor(templat1,cv2.COLOR_BGR2HSV) # แปลงเป็น HSV
@@ -34,7 +34,7 @@ def detect_red_object(img_read):
     value = cv2.matchTemplate(img_binary_uint8, template_binary_uint8_1, cv2.TM_CCOEFF_NORMED)
     value2 = cv2.matchTemplate(img_binary_uint8, template_binary_uint8_2, cv2.TM_CCOEFF_NORMED)
     value3 = cv2.matchTemplate(img_binary_uint8, template_binary_uint8_3, cv2.TM_CCOEFF_NORMED)
-
+    
     # หาค่าสูงสุด
     min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(value)
     min_val2, max_val2, min_loc2, max_loc2 = cv2.minMaxLoc(value2)
@@ -59,37 +59,48 @@ def detect_red_object(img_read):
         max_val = max_val3
         bottom_right = (top_left[0] + template_w, top_left[1] + template_h)
         template_binary_uint8=template_binary_uint8_3
-
+    
     # for y in range(template_h):
     #     if np.any(template_binary_uint8[y, :] == 255):
     #         top = y
-    #         break
+    #         continue
     # # หาขอบล่าง
     # for y in range(template_h-1, -1, -1):
     #     if np.any(template_binary_uint8[y, :] == 255):
     #         bottom = y
-    #         break
+    #         continue
     # # หาขอบซ้าย
     # for x in range(template_w):
     #     if np.any(template_binary_uint8[:, x] == 255):
     #         left = x
-    #         break
+    #         continue
     # # หาขอบขวา
     # for x in range(template_w-1, -1, -1):
     #     if np.any(template_binary_uint8[:, x] == 255):
     #         right = x
-    #         break
+    #         continue
 
     # top_left = (max_loc[0] + left,max_loc[1] + top)
     # bottom_right = (max_loc[0] + right, max_loc[1] + bottom)
     # print(top,bottom,left,right)
-    cv2.rectangle(img_read, top_left, bottom_right, (0, 255, 0), 2) # วาดกรอบ (สีเขียว)
-    size_y=bottom_right[1]-top_left[1]
-    size_x=bottom_right[0]-top_left[0]
-    distance_x=671.43*5.6/size_x
-    distance_y=671.43*4.2/size_y
-    distance_avg=(distance_x+distance_y)/2
-    return img_read, max_val,distance_avg # คืนค่าภาพที่วาดกรอบแล้ว
+    
+    if max_val > 0.4 and max_val is not None:
+        cv2.rectangle(img_read, top_left, bottom_right, (0, 255, 0), 2) # วาดกรอบ (สีเขียว)
+        size_y = bottom_right[1] - top_left[1]
+        size_x = bottom_right[0] - top_left[0]
+        # ป้องกันหารศูนย์
+        if size_x > 0 and size_y > 0:
+            distance_x = 671.43 * 5.6 / size_x
+            distance_y = 671.43 * 4.2 / size_y
+            distance_avg = (distance_x + distance_y) / 2
+        else:
+            distance_avg = 0
+    else:
+        # ไม่เจอวัตถุ: ไม่วาดกรอบ, ระยะเป็น 0
+        distance_avg = 0
+        max_val = 0
+# ...existing code...
+    return img_read,max_val, distance_avg
 
 # -*-coding:utf-8-*-
 # Copyright (c) 2020 DJI.
@@ -124,19 +135,18 @@ if __name__ == '__main__':
     print("กด Q เพื่อออก")
     try:
         while True:
-            frame = ep_camera.read_cv2_image(strategy="newest", timeout=2.0)
-            if frame is not None:
-                # เรียกฟังก์ชัน detect_red_object และรับภาพที่วาดกรอบแล้ว
-                frame_with_rect, max_val, distance_avg = detect_red_object(frame)
+            frame = ep_camera.read_cv2_image(strategy="newest")
+            # เรียกฟังก์ชัน detect_red_object และรับภาพที่วาดกรอบแล้ว
+            frame_res,max_val, distance_avg = detect_red_object(frame)
 
-                # แสดงผลภาพที่วาดกรอบแล้ว
-                cv2.imshow("Live (with detection)", frame_with_rect)
-                print(f"Max val: {max_val}, Distance avg: {distance_avg}")
+            # แสดงผลภาพที่วาดกรอบแล้ว
+            cv2.imshow("Live (with detection)", frame_res)
+            print(f"Max val: {max_val}, Distance avg: {distance_avg}")
 
-                if cv2.waitKey(1) & 0xFF in (ord('q'), ord('Q')):
-                    break
-            else:
-                time.sleep(0.01)
+            if cv2.waitKey(1) & 0xFF in (ord('q'), ord('Q')):
+                break
+    except Exception as e:
+        print(e)
     finally:
         cv2.destroyAllWindows()
         ep_camera.stop_video_stream()
