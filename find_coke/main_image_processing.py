@@ -4,149 +4,169 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os, tempfile, time
 
+# ========= utils เล็กๆ =========
+def _clip(v, lo, hi):
+    return max(lo, min(int(v), hi))
+
+def _tight_bbox_from_mask(mask_bool):
+    """
+    mask_bool: HxW (dtype=bool) ของบริเวณย่อย (window)
+    return: (x_min, y_min, x_max, y_max) ในพิกัดของ window (inclusive x_min/y_min, exclusive x_max/y_max)
+            ถ้าไม่พบพิกเซล True เลย ให้คืน None
+    """
+    ys, xs = np.where(mask_bool)
+    if ys.size == 0:
+        return None
+    y_min, y_max = int(ys.min()), int(ys.max())+1
+    x_min, x_max = int(xs.min()), int(xs.max())+1
+    return x_min, y_min, x_max, y_max
+
 def detect_red_object(img_read):
-    img_hsv = cv2.cvtColor(img_read, cv2.COLOR_BGR2HSV) # แปลงเป็น HSV
-    h,s,v=cv2.split(img_hsv) # แยก HSV
-    img_binary = ((h > 30) & (h < 40) & (s > 170))# ทำเป็น binary
+    # ----- เตรียมภาพ -----
+    img_hsv = cv2.cvtColor(img_read, cv2.COLOR_BGR2HSV)
+    h, s, v = cv2.split(img_hsv)
 
-    templat1=cv2.imread(r"find_coke\box_1.jpg") # โหลดภาพ
-    template_hsv=cv2.cvtColor(templat1,cv2.COLOR_BGR2HSV) # แปลงเป็น HSV
-    template_h,template_s,template_v_1=cv2.split(template_hsv) # แยก HSV
-    template_binary1 = (template_v_1 > 100) # สร้าง mask
+    # หมายเหตุ: ช่วงนี้คือ "เหลือง" (20-40) ตามที่คุณตั้งไว้
+    img_binary = ((h > 25) & (h < 40) & (s > 160)&(v>100))
 
-    templat2=cv2.imread(r"find_coke\box_2.jpg") # โหลดภาพ
-    template_hsv=cv2.cvtColor(templat2,cv2.COLOR_BGR2HSV) # แปลงเป็น HSV
-    template_h,template_s,template_v_2=cv2.split(template_hsv) # แยก HSV
-    template_binary2 = (template_v_2 > 100) # สร้าง mask
+    # ทำเป็น uint8 เพื่อใช้กับ matchTemplate
+    img_binary_uint8 = (img_binary.astype(np.uint8) * 255)
 
-    templat3=cv2.imread(r"find_coke\box_3.jpg") # โหลดภาพ
-    template_hsv=cv2.cvtColor(templat3,cv2.COLOR_BGR2HSV) # แปลงเป็น HSV
-    template_h,template_s,template_v_3=cv2.split(template_hsv) # แยก HSV
-    template_binary3 = (template_v_3 > 100) # สร้าง mask
+    # ----- โหลด template 3 อัน -----
+    templat1 = cv2.imread(r"find_coke\box_1_test.jpg")
+    templat2 = cv2.imread(r"find_coke\box_2_test.jpg")
+    templat3 = cv2.imread(r"find_coke\box_3_test.jpg")
 
-    # เปลี่ยนเป็น uint8
-    img_binary_uint8 = img_binary.astype(np.uint8) * 255
-    template_binary_uint8_1 = template_binary1.astype(np.uint8) * 255
-    template_binary_uint8_2 = template_binary2.astype(np.uint8) * 255
-    template_binary_uint8_3 = template_binary3.astype(np.uint8) * 255
+    if templat1 is None or templat2 is None or templat3 is None:
+        raise FileNotFoundError("ไม่พบไฟล์ template บางไฟล์ในโฟลเดอร์ find_coke")
 
-    # จับคู่ภาพกับ template
-    value = cv2.matchTemplate(img_binary_uint8, template_binary_uint8_1, cv2.TM_CCOEFF_NORMED)
+    # แปลงเป็น binary เช่นเดียวกับภาพหลัก (ใช้ช่อง V > 100)
+    def _tpl_to_bin_u8(img_bgr):
+        tpl_hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+        _, _, tpl_v = cv2.split(tpl_hsv)
+        tpl_bin = (tpl_v > 100).astype(np.uint8) * 255
+        return tpl_bin
+
+    template_binary_uint8_1 = _tpl_to_bin_u8(templat1)
+    template_binary_uint8_2 = _tpl_to_bin_u8(templat2)
+    template_binary_uint8_3 = _tpl_to_bin_u8(templat3)
+
+    # ตรวจสอบขนาด: template ต้องเล็กกว่าหรือเท่าภาพหลัก
+    H, W = img_binary_uint8.shape[:2]
+    for tname, T in [("box_1", template_binary_uint8_1),
+                     ("box_2", template_binary_uint8_2),
+                     ("box_3", template_binary_uint8_3)]:
+        th, tw = T.shape[:2]
+        if th > H or tw > W:
+            raise ValueError(f"Template {tname} ใหญ่กว่าภาพอินพุต (th={th}, tw={tw}, H={H}, W={W})")
+
+    # ----- matchTemplate กับทั้ง 3 อัน -----
+    value1 = cv2.matchTemplate(img_binary_uint8, template_binary_uint8_1, cv2.TM_CCOEFF_NORMED)
     value2 = cv2.matchTemplate(img_binary_uint8, template_binary_uint8_2, cv2.TM_CCOEFF_NORMED)
     value3 = cv2.matchTemplate(img_binary_uint8, template_binary_uint8_3, cv2.TM_CCOEFF_NORMED)
-    
-    # หาค่าสูงสุด
-    min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(value)
-    min_val2, max_val2, min_loc2, max_loc2 = cv2.minMaxLoc(value2)
-    min_val3, max_val3, min_loc3, max_loc3 = cv2.minMaxLoc(value3)
 
-    # เลือก template ที่ตรงกันมากที่สุด
-    if max(max_val, max_val2, max_val3) == max_val:
-        top_left = max_loc
-        template_h, template_w = template_binary_uint8_1.shape
-        max_val = max_val
-        bottom_right = (top_left[0] + template_w, top_left[1] + template_h)
-        template_binary_uint8=template_binary_uint8_1
-    elif max(max_val, max_val2, max_val3) == max_val2:
+    min_val1, max_val1, _, max_loc1 = cv2.minMaxLoc(value1)
+    min_val2, max_val2, _, max_loc2 = cv2.minMaxLoc(value2)
+    min_val3, max_val3, _, max_loc3 = cv2.minMaxLoc(value3)
+
+    # ----- เลือก template ที่คะแนนสูงสุด -----
+    best_idx = int(np.argmax([max_val1, max_val2, max_val3]))
+    if best_idx == 0:
+        top_left = max_loc1
+        tpl = template_binary_uint8_1
+        max_val = max_val1
+    elif best_idx == 1:
         top_left = max_loc2
-        template_h, template_w = template_binary_uint8_2.shape
+        tpl = template_binary_uint8_2
         max_val = max_val2
-        template_binary_uint8=template_binary_uint8_2
-        bottom_right = (top_left[0] + template_w, top_left[1] + template_h)
     else:
         top_left = max_loc3
-        template_h, template_w = template_binary_uint8_3.shape
+        tpl = template_binary_uint8_3
         max_val = max_val3
-        bottom_right = (top_left[0] + template_w, top_left[1] + template_h)
-        template_binary_uint8=template_binary_uint8_3
-    
-    # for y in range(template_h):
-    #     if np.any(template_binary_uint8[y, :] == 255):
-    #         top = y
-    #         continue
-    # # หาขอบล่าง
-    # for y in range(template_h-1, -1, -1):
-    #     if np.any(template_binary_uint8[y, :] == 255):
-    #         bottom = y
-    #         continue
-    # # หาขอบซ้าย
-    # for x in range(template_w):
-    #     if np.any(template_binary_uint8[:, x] == 255):
-    #         left = x
-    #         continue
-    # # หาขอบขวา
-    # for x in range(template_w-1, -1, -1):
-    #     if np.any(template_binary_uint8[:, x] == 255):
-    #         right = x
-    #         continue
 
-    # top_left = (max_loc[0] + left,max_loc[1] + top)
-    # bottom_right = (max_loc[0] + right, max_loc[1] + bottom)
-    # print(top,bottom,left,right)
-    
-    if max_val > 0.4 and max_val is not None:
-        cv2.rectangle(img_read, top_left, bottom_right, (0, 255, 0), 2) # วาดกรอบ (สีเขียว)
-        size_y = bottom_right[1] - top_left[1]
-        size_x = bottom_right[0] - top_left[0]
-        # ป้องกันหารศูนย์
-        if size_x > 0 and size_y > 0:
-            distance_x = 671.43 * 5.6 / size_x
-            distance_y = 671.43 * 4.2 / size_y
-            distance_avg = (distance_x + distance_y) / 2
+    th, tw = tpl.shape[:2]
+
+    # ----- ถ้าคะแนนดีพอ ค่อยทำ tight bbox ภายใน "หน้าต่าง" รอบตำแหน่งแมตช์ -----
+    # เกณฑ์เดิม: > 0.4
+    distance_avg = 0.0
+
+    if max_val is not None and max_val > 0.4:
+        x0, y0 = int(top_left[0]), int(top_left[1])
+        x1, y1 = x0 + tw, y0 + th
+
+        # กันขอบภาพ
+        x0c = _clip(x0, 0, W - 1)
+        y0c = _clip(y0, 0, H - 1)
+        x1c = _clip(x1, 1, W)     # exclusive ขอบขวา ใช้ W ได้เลย
+        y1c = _clip(y1, 1, H)     # exclusive ขอบล่าง ใช้ H ได้เลย
+
+        # หน้าต่างค้นหาใน img_binary (bool)
+        window_mask = img_binary[y0c:y1c, x0c:x1c]
+        # หา bbox ที่ “แน่น” จาก True pixels ภายในหน้าต่าง
+        tight = _tight_bbox_from_mask(window_mask)
+        if tight is not None:
+            tx0, ty0, tx1, ty1 = tight  # พิกัดภายใน window
+            # แปลงกลับเป็นพิกัดเต็มภาพ
+            top_left_tight = (x0c + tx0, y0c + ty0)
+            bottom_right_tight = (x0c + tx1, y0c + ty1)
+
+            # วาดกรอบ
+            cv2.rectangle(img_read, top_left_tight, bottom_right_tight, (0, 255, 0), 2)
+
+            size_x = bottom_right_tight[0] - top_left_tight[0]
+            size_y = bottom_right_tight[1] - top_left_tight[1]
+            print(size_x, size_y)
+
+            if size_x > 0 and size_y > 0:
+                # ใช้ค่าคงที่เดิม
+                distance_x = 578.57  * 5.6 / size_x
+                distance_y = 587.75 * 14.7 / size_y
+                print(distance_y,distance_x)
+                distance_avg = (distance_x + distance_y) / 2.0
+            else:
+                distance_avg = 0.0
         else:
-            distance_avg = 0
+            # ในหน้าต่างไม่มีพิกเซล True เลย (อาจกรองสีไม่ผ่าน)
+            distance_avg = 0.0
+            max_val = 0.0
     else:
-        # ไม่เจอวัตถุ: ไม่วาดกรอบ, ระยะเป็น 0
-        distance_avg = 0
-        max_val = 0
-# ...existing code...
-    return img_read,max_val, distance_avg
+        distance_avg = 0.0
+        max_val = 0.0
 
-# -*-coding:utf-8-*-
-# Copyright (c) 2020 DJI.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License in the file LICENSE.txt or at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+    return img_read, max_val, distance_avg
 
+# ================== main ==================
 import cv2
 import robomaster
 from robomaster import robot
 from robomaster import vision
-
 
 robots = []
 
 if __name__ == '__main__':
     ep_robot = robot.Robot()
     ep_robot.initialize(conn_type="ap")
-
+    ep_gimbal=ep_robot.gimbal
+    ep_gimbal.moveto(yaw = 0, pitch = 0).wait_for_completed()
     ep_camera = ep_robot.camera
-    ep_camera.start_video_stream(display=False, resolution='720p')  # 1080p ช้าได้
+    ep_camera.start_video_stream(display=False, resolution='720p')  # 1080p อาจช้า
 
     print("กด Q เพื่อออก")
     try:
         while True:
             frame = ep_camera.read_cv2_image(strategy="newest")
-            # เรียกฟังก์ชัน detect_red_object และรับภาพที่วาดกรอบแล้ว
-            frame_res,max_val, distance_avg = detect_red_object(frame)
+            if frame is None:
+                continue
 
-            # แสดงผลภาพที่วาดกรอบแล้ว
+            frame_res, max_val, distance_avg = detect_red_object(frame)
+
             cv2.imshow("Live (with detection)", frame_res)
-            print(f"Max val: {max_val}, Distance avg: {distance_avg}")
+            print(f"Max val: {max_val:.2f}, Distance avg: {distance_avg:.2f} cm")
 
             if cv2.waitKey(1) & 0xFF in (ord('q'), ord('Q')):
                 break
     except Exception as e:
-        print(e)
+        print("Error:", e)
     finally:
         cv2.destroyAllWindows()
         ep_camera.stop_video_stream()

@@ -234,7 +234,7 @@ if __name__ == '__main__':
     try:
         while True:
             # วาดเส้นแกน x (แนวนอน) และ y (แนวตั้ง)
-            img = ep_camera.read_cv2_image(strategy="newest") # อ่านภาพจากกล้อง
+            img = ep_camera.read_cv2_image(strategy="newest",timeout=2) # อ่านภาพจากกล้อง
             out_img, Zavg, Zx, Zy = detetct_can(img)
             
             # แสดงภาพที่มี overlay แล้ว
