@@ -180,151 +180,114 @@ if __name__ == "__main__":
 
     ep_robot = None; ep_camera = None; ep_gimbal = None
 
-    # ===== CSV (ถ้าอยากเก็บ log) =====
-    LOG_DIR = os.path.join(os.getcwd(), "logs"); os.makedirs(LOG_DIR, exist_ok=True)
-    ts = time.strftime("%Y%m%d_%H%M%S")
-    csv_path = os.path.join(LOG_DIR, f"measure_track_{ts}.csv")
-    print("CSV path:", abs_path(csv_path))
+    try:
+        ep_robot = robot.Robot(); ep_robot.initialize(conn_type="ap")
+        ep_gimbal = ep_robot.gimbal
+        ep_camera = ep_robot.camera
 
-    with open(csv_path, "w", newline="", encoding="utf-8", buffering=1) as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            "t_s","dt_s","conf",
-            "cx","cy","size_x","size_y",
-            "dist_x_cm","dist_y_cm","dist_avg_cm",
-            "yaw_err_deg","pitch_err_deg",
-            "pid_yaw","pid_pitch",
-            "yaw_out_deg","pitch_out_deg"
-        ])
-        safe_flush(f, csv_path)
+        try: ep_gimbal.recenter().wait_for_completed()
+        except Exception: pass
 
-        try:
-            ep_robot = robot.Robot(); ep_robot.initialize(conn_type="ap")
-            ep_gimbal = ep_robot.gimbal
-            ep_camera = ep_robot.camera
+        # ---- seed/subscribe มุมกิมบอล (กันค่าว่าง) ----
+        gimbal_state = {"yaw": 0.0, "pitch": 0.0}
+        _got = {"ok": False}
+        def _gimbal_cb(ang):
+            pitch_angle, yaw_angle, pitch_ground_angle, yaw_ground_angle = ang
+            gimbal_state["yaw"]   = float(yaw_angle)
+            gimbal_state["pitch"] = float(pitch_angle)
+            _got["ok"] = True
+        ep_gimbal.sub_angle(freq=20, callback=_gimbal_cb)
 
-            try: ep_gimbal.recenter().wait_for_completed()
-            except Exception: pass
+        t_wait0 = time.monotonic()
+        while not _got["ok"] and (time.monotonic()-t_wait0) < 1.0:
+            time.sleep(0.01)
 
-            # ---- seed/subscribe มุมกิมบอล (กันค่าว่าง) ----
-            gimbal_state = {"yaw": 0.0, "pitch": 0.0}
-            _got = {"ok": False}
-            def _gimbal_cb(ang):
-                pitch_angle, yaw_angle, pitch_ground_angle, yaw_ground_angle = ang
-                gimbal_state["yaw"]   = float(yaw_angle)
-                gimbal_state["pitch"] = float(pitch_angle)
-                _got["ok"] = True
-            ep_gimbal.sub_angle(freq=20, callback=_gimbal_cb)
+        est_yaw = gimbal_state["yaw"]
+        est_pitch = gimbal_state["pitch"]
 
-            t_wait0 = time.monotonic()
-            while not _got["ok"] and (time.monotonic()-t_wait0) < 1.0:
-                time.sleep(0.01)
+        ep_camera.start_video_stream(display=False, resolution="720p")
+        print("เริ่มสตรีม — กด Q เพื่อออก")
 
-            est_yaw = gimbal_state["yaw"]
-            est_pitch = gimbal_state["pitch"]
+        pid_yaw   = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=10.0)
+        pid_pitch = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip= 8.0)
 
-            ep_camera.start_video_stream(display=False, resolution="720p")
-            print("เริ่มสตรีม — กด Q เพื่อออก")
+        t0 = time.monotonic(); last_t = t0
 
-            pid_yaw   = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=10.0)
-            pid_pitch = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip= 8.0)
+        while True:
+            frame = ep_camera.read_cv2_image(strategy="newest", timeout=2)
+            now = time.monotonic(); dt = now - last_t; last_t = now
+            if frame is None:
+                time.sleep(0.01); continue
 
-            t0 = time.monotonic(); last_t = t0
-            rows = 0
+            vis, center, conf, sx, sy, dx, dy, davg = detect_and_measure(frame)
 
-            while True:
-                frame = ep_camera.read_cv2_image(strategy="newest", timeout=2)
-                now = time.monotonic(); dt = now - last_t; last_t = now
-                if frame is None:
-                    time.sleep(0.01); continue
+            yaw_err_deg = pitch_err_deg = 0.0
+            yaw_cmd = pitch_cmd = 0.0
+            cx = cy = ""
 
-                vis, center, conf, sx, sy, dx, dy, davg = detect_and_measure(frame)
+            if center is not None:
+                cx_i, cy_i = center
+                cx, cy = int(cx_i), int(cy_i)
 
-                yaw_err_deg = pitch_err_deg = 0.0
-                yaw_cmd = pitch_cmd = 0.0
-                cx = cy = ""
+                # error เป็นองศาตามสัดส่วนพิกเซล
+                half_w = CAMERA_W / 2.0
+                half_h = CAMERA_H / 2.0
+                err_x = (cx - half_w) / half_w
+                err_y = (cy - half_h) / half_h
 
-                if center is not None:
-                    cx_i, cy_i = center
-                    cx, cy = int(cx_i), int(cy_i)
+                yaw_err_deg   =  err_x * (CAMERA_HFOV_DEG/2.0)
+                pitch_err_deg = -err_y * (CAMERA_VFOV_DEG/2.0)
 
-                    # error เป็นองศาตามสัดส่วนพิกเซล
-                    half_w = CAMERA_W / 2.0
-                    half_h = CAMERA_H / 2.0
-                    err_x = (cx - half_w) / half_w
-                    err_y = (cy - half_h) / half_h
+                yaw_cmd   = pid_yaw.step(yaw_err_deg, dt)
+                pitch_cmd = pid_pitch.step(pitch_err_deg, dt)
 
-                    yaw_err_deg   =  err_x * (CAMERA_HFOV_DEG/2.0)
-                    pitch_err_deg = -err_y * (CAMERA_VFOV_DEG/2.0)
-
-                    yaw_cmd   = pid_yaw.step(yaw_err_deg, dt)
-                    pitch_cmd = pid_pitch.step(pitch_err_deg, dt)
-
-                    if abs(yaw_cmd) > 0.05 or abs(pitch_cmd) > 0.05:
+                if abs(yaw_cmd) > 0.05 or abs(pitch_cmd) > 0.05:
+                    try:
+                        ep_gimbal.move(yaw=yaw_cmd, pitch=pitch_cmd,
+                                       yaw_speed=GIMBAL_TURN_SPEED, pitch_speed=GIMBAL_TURN_SPEED
+                                       ).wait_for_completed()
+                    except Exception:
                         try:
                             ep_gimbal.move(yaw=yaw_cmd, pitch=pitch_cmd,
-                                           yaw_speed=GIMBAL_TURN_SPEED, pitch_speed=GIMBAL_TURN_SPEED
-                                           ).wait_for_completed()
+                                           yaw_speed=GIMBAL_TURN_SPEED, pitch_speed=GIMBAL_TURN_SPEED)
                         except Exception:
-                            try:
-                                ep_gimbal.move(yaw=yaw_cmd, pitch=pitch_cmd,
-                                               yaw_speed=GIMBAL_TURN_SPEED, pitch_speed=GIMBAL_TURN_SPEED)
-                            except Exception:
-                                pass
-                else:
-                    # soften integral ถ้าไม่เห็นเป้า
-                    pid_yaw.integ *= 0.9
-                    pid_pitch.integ *= 0.9
+                            pass
+            else:
+                # soften integral ถ้าไม่เห็นเป้า
+                pid_yaw.integ *= 0.9
+                pid_pitch.integ *= 0.9
 
-                # อัปเดต estimator ให้ไม่ว่าง
-                est_yaw  += yaw_cmd
-                est_pitch += pitch_cmd
-                yaw_out   = gimbal_state["yaw"]   if isinstance(gimbal_state["yaw"], (int,float)) else est_yaw
-                pitch_out = gimbal_state["pitch"] if isinstance(gimbal_state["pitch"], (int,float)) else est_pitch
+            # อัปเดต estimator ให้ไม่ว่าง
+            est_yaw  += yaw_cmd
+            est_pitch += pitch_cmd
+            yaw_out   = gimbal_state["yaw"]   if isinstance(gimbal_state["yaw"], (int,float)) else est_yaw
+            pitch_out = gimbal_state["pitch"] if isinstance(gimbal_state["pitch"], (int,float)) else est_pitch
 
-                # overlay เพิ่ม
-                cv2.putText(vis, f"dist_avg={davg:.2f} cm", (10, 78),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,220,255), 2)
-                cv2.putText(vis, f"yaw_err={yaw_err_deg:+.2f} pitch_err={pitch_err_deg:+.2f}",
-                            (10, 104), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,220,255), 2)
-                cv2.putText(vis, f"pid_yaw={yaw_cmd:+.2f} pid_pitch={pitch_cmd:+.2f}",
-                            (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,220,255), 2)
+            # overlay เพิ่ม
+            cv2.putText(vis, f"dist_avg={davg:.2f} cm", (10, 78),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,220,255), 2)
+            cv2.putText(vis, f"yaw_err={yaw_err_deg:+.2f} pitch_err={pitch_err_deg:+.2f}",
+                        (10, 104), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,220,255), 2)
+            cv2.putText(vis, f"pid_yaw={yaw_cmd:+.2f} pid_pitch={pitch_cmd:+.2f}",
+                        (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,220,255), 2)
 
-                # log
-                writer.writerow([
-                    f"{now - t0:.3f}", f"{dt:.4f}", f"{conf:.3f}",
-                    cx, cy, sx, sy,
-                    f"{dx:.3f}", f"{dy:.3f}", f"{davg:.3f}",
-                    f"{yaw_err_deg:.3f}", f"{pitch_err_deg:.3f}",
-                    f"{yaw_cmd:.3f}", f"{pitch_cmd:.3f}",
-                    f"{yaw_out:.3f}", f"{pitch_out:.3f}",
-                ])
-                rows += 1
-                if rows % FLUSH_EVERY_N_ROWS == 0:
-                    safe_flush(f, csv_path)
+            cv2.imshow("Measure + PID track (yellow object)", vis)
+            if cv2.waitKey(1) & 0xFF in (ord('q'), ord('Q')):
+                break
 
-                cv2.imshow("Measure + PID track (yellow object)", vis)
-                if cv2.waitKey(1) & 0xFF in (ord('q'), ord('Q')):
-                    break
-
-        except KeyboardInterrupt:
-            print("\n[INFO] KeyboardInterrupt — stopping.")
-        except Exception:
-            print("\n[ERROR] Unhandled exception:", file=sys.stderr)
-            traceback.print_exc()
-        finally:
-            try:
-                if ep_camera is not None: ep_camera.stop_video_stream()
-            except Exception: pass
-            try:
-                if ep_gimbal is not None: ep_gimbal.unsub_angle()
-            except Exception: pass
-            try:
-                if ep_robot is not None: ep_robot.close()
-            except Exception: pass
-            safe_flush(f, csv_path)
-            cv2.destroyAllWindows()
-            try:
-                print(f"CSV saved → {abs_path(csv_path)} ({os.path.getsize(csv_path)} bytes)")
-            except Exception:
-                print(f"CSV saved → {abs_path(csv_path)}")
+    except KeyboardInterrupt:
+        print("\n[INFO] KeyboardInterrupt — stopping.")
+    except Exception:
+        print("\n[ERROR] Unhandled exception:", file=sys.stderr)
+        traceback.print_exc()
+    finally:
+        try:
+            if ep_camera is not None: ep_camera.stop_video_stream()
+        except Exception: pass
+        try:
+            if ep_gimbal is not None: ep_gimbal.unsub_angle()
+        except Exception: pass
+        try:
+            if ep_robot is not None: ep_robot.close()
+        except Exception: pass
+        cv2.destroyAllWindows()
