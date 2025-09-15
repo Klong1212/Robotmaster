@@ -1,173 +1,330 @@
-import robomaster
+# -*- coding: utf-8 -*-
+"""
+RoboMaster EP — Distance-first + PID Tracking (Yaw/Pitch) + Overlay
+- โฟกัสวัดระยะจากขนาดกรอบ (tight bbox) แล้วใช้ PID หันตามเป้า
+- สีหลัก: โทนเหลือง (HSV h≈25-40, s>160, v>100)
+"""
+
+import os, sys, time, math, csv, traceback
 import cv2
-import matplotlib.pyplot as plt
 import numpy as np
-import os, tempfile, time
-
-# ========= utils เล็กๆ =========
-def _clip(v, lo, hi):
-    return max(lo, min(int(v), hi))
-
-def _tight_bbox_from_mask(mask_bool):
-    """
-    mask_bool: HxW (dtype=bool) ของบริเวณย่อย (window)
-    return: (x_min, y_min, x_max, y_max) ในพิกัดของ window (inclusive x_min/y_min, exclusive x_max/y_max)
-            ถ้าไม่พบพิกเซล True เลย ให้คืน None
-    """
-    ys, xs = np.where(mask_bool)
-    if ys.size == 0:
-        return None
-    y_min, y_max = int(ys.min()), int(ys.max())+1
-    x_min, x_max = int(xs.min()), int(xs.max())+1
-    return x_min, y_min, x_max, y_max
-
-def detect_red_object(img_read):
-    # ----- เตรียมภาพ -----
-    img_hsv = cv2.cvtColor(img_read, cv2.COLOR_BGR2HSV)
-    h, s, v = cv2.split(img_hsv)
-
-    # หมายเหตุ: ช่วงนี้คือ "เหลือง" (20-40) ตามที่คุณตั้งไว้
-    img_binary = ((h > 25) & (h < 40) & (s > 160)&(v>100))
-
-    # ทำเป็น uint8 เพื่อใช้กับ matchTemplate
-    img_binary_uint8 = (img_binary.astype(np.uint8) * 255)
-
-    # ----- โหลด template 3 อัน -----
-    templat1 = cv2.imread(r"find_coke\box_1_test.jpg")
-    templat2 = cv2.imread(r"find_coke\box_2_test.jpg")
-    templat3 = cv2.imread(r"find_coke\box_3_test.jpg")
-
-    if templat1 is None or templat2 is None or templat3 is None:
-        raise FileNotFoundError("ไม่พบไฟล์ template บางไฟล์ในโฟลเดอร์ find_coke")
-
-    # แปลงเป็น binary เช่นเดียวกับภาพหลัก (ใช้ช่อง V > 100)
-    def _tpl_to_bin_u8(img_bgr):
-        tpl_hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
-        _, _, tpl_v = cv2.split(tpl_hsv)
-        tpl_bin = (tpl_v > 100).astype(np.uint8) * 255
-        return tpl_bin
-
-    template_binary_uint8_1 = _tpl_to_bin_u8(templat1)
-    template_binary_uint8_2 = _tpl_to_bin_u8(templat2)
-    template_binary_uint8_3 = _tpl_to_bin_u8(templat3)
-
-    # ตรวจสอบขนาด: template ต้องเล็กกว่าหรือเท่าภาพหลัก
-    H, W = img_binary_uint8.shape[:2]
-    for tname, T in [("box_1", template_binary_uint8_1),
-                     ("box_2", template_binary_uint8_2),
-                     ("box_3", template_binary_uint8_3)]:
-        th, tw = T.shape[:2]
-        if th > H or tw > W:
-            raise ValueError(f"Template {tname} ใหญ่กว่าภาพอินพุต (th={th}, tw={tw}, H={H}, W={W})")
-
-    # ----- matchTemplate กับทั้ง 3 อัน -----
-    value1 = cv2.matchTemplate(img_binary_uint8, template_binary_uint8_1, cv2.TM_CCOEFF_NORMED)
-    value2 = cv2.matchTemplate(img_binary_uint8, template_binary_uint8_2, cv2.TM_CCOEFF_NORMED)
-    value3 = cv2.matchTemplate(img_binary_uint8, template_binary_uint8_3, cv2.TM_CCOEFF_NORMED)
-
-    min_val1, max_val1, _, max_loc1 = cv2.minMaxLoc(value1)
-    min_val2, max_val2, _, max_loc2 = cv2.minMaxLoc(value2)
-    min_val3, max_val3, _, max_loc3 = cv2.minMaxLoc(value3)
-
-    # ----- เลือก template ที่คะแนนสูงสุด -----
-    best_idx = int(np.argmax([max_val1, max_val2, max_val3]))
-    if best_idx == 0:
-        top_left = max_loc1
-        tpl = template_binary_uint8_1
-        max_val = max_val1
-    elif best_idx == 1:
-        top_left = max_loc2
-        tpl = template_binary_uint8_2
-        max_val = max_val2
-    else:
-        top_left = max_loc3
-        tpl = template_binary_uint8_3
-        max_val = max_val3
-
-    th, tw = tpl.shape[:2]
-
-    # ----- ถ้าคะแนนดีพอ ค่อยทำ tight bbox ภายใน "หน้าต่าง" รอบตำแหน่งแมตช์ -----
-    # เกณฑ์เดิม: > 0.4
-    distance_avg = 0.0
-
-    if max_val is not None and max_val > 0.4:
-        x0, y0 = int(top_left[0]), int(top_left[1])
-        x1, y1 = x0 + tw, y0 + th
-
-        # กันขอบภาพ
-        x0c = _clip(x0, 0, W - 1)
-        y0c = _clip(y0, 0, H - 1)
-        x1c = _clip(x1, 1, W)     # exclusive ขอบขวา ใช้ W ได้เลย
-        y1c = _clip(y1, 1, H)     # exclusive ขอบล่าง ใช้ H ได้เลย
-
-        # หน้าต่างค้นหาใน img_binary (bool)
-        window_mask = img_binary[y0c:y1c, x0c:x1c]
-        # หา bbox ที่ “แน่น” จาก True pixels ภายในหน้าต่าง
-        tight = _tight_bbox_from_mask(window_mask)
-        if tight is not None:
-            tx0, ty0, tx1, ty1 = tight  # พิกัดภายใน window
-            # แปลงกลับเป็นพิกัดเต็มภาพ
-            top_left_tight = (x0c + tx0, y0c + ty0)
-            bottom_right_tight = (x0c + tx1, y0c + ty1)
-
-            # วาดกรอบ
-            cv2.rectangle(img_read, top_left_tight, bottom_right_tight, (0, 255, 0), 2)
-
-            size_x = bottom_right_tight[0] - top_left_tight[0]
-            size_y = bottom_right_tight[1] - top_left_tight[1]
-            print(size_x, size_y)
-
-            if size_x > 0 and size_y > 0:
-                # ใช้ค่าคงที่เดิม
-                distance_x = 578.57  * 5.6 / size_x
-                distance_y = 587.75 * 14.7 / size_y
-                print(distance_y,distance_x)
-                distance_avg = (distance_x + distance_y) / 2.0
-            else:
-                distance_avg = 0.0
-        else:
-            # ในหน้าต่างไม่มีพิกเซล True เลย (อาจกรองสีไม่ผ่าน)
-            distance_avg = 0.0
-            max_val = 0.0
-    else:
-        distance_avg = 0.0
-        max_val = 0.0
-
-    return img_read, max_val, distance_avg
-
-# ================== main ==================
-import cv2
 import robomaster
 from robomaster import robot
-from robomaster import vision
 
-robots = []
+# ========= กล้อง/กิมบอล =========
+CAMERA_W = 1280
+CAMERA_H = 720
+CAMERA_HFOV_DEG = 120.0
+ASPECT = CAMERA_W / CAMERA_H
+CAMERA_VFOV_DEG = math.degrees(2.0 * math.atan(math.tan(math.radians(CAMERA_HFOV_DEG/2.0)) / ASPECT))
 
-if __name__ == '__main__':
-    ep_robot = robot.Robot()
-    ep_robot.initialize(conn_type="ap")
-    ep_gimbal=ep_robot.gimbal
-    ep_gimbal.moveto(yaw = 0, pitch = 0).wait_for_completed()
-    ep_camera = ep_robot.camera
-    ep_camera.start_video_stream(display=False, resolution='720p')  # 1080p อาจช้า
+GIMBAL_TURN_SPEED = 360
+FLUSH_EVERY_N_ROWS = 20
 
-    print("กด Q เพื่อออก")
+# ========= ค่าคงที่วัดระยะ (จากงานเดิมของคุณ) =========
+# ใช้สองแกน แล้วเฉลี่ย
+KPIX_X = 578.57; OBJ_W_CM = 5.6   # จาก size_x
+KPIX_Y = 587.75; OBJ_H_CM = 14.7  # จาก size_y
+
+# ========= เกณฑ์การตรวจจับ =========
+TEMPLATE_MATCH_THRESHOLD = 0.40  # เกณฑ์ผ่าน
+HSV_H_LO, HSV_H_HI = 25, 40
+HSV_S_MIN = 160
+HSV_V_MIN = 100
+
+TEMPLATE_PATHS = [
+    r"find_coke\box_1_test.jpg",
+    r"find_coke\box_2_test.jpg",
+    r"find_coke\box_3_test.jpg",
+]
+
+# ========= PID =========
+class PID:
+    def __init__(self, kp=0.2, ki=0.0, kd=0.0, integ_clip=40.0, out_clip=10.0):
+        self.kp, self.ki, self.kd = kp, ki, kd
+        self.integ = 0.0
+        self.prev_err = 0.0
+        self.integ_clip = float(integ_clip)
+        self.out_clip = float(out_clip)
+    def reset(self):
+        self.integ = 0.0; self.prev_err = 0.0
+    def step(self, err, dt):
+        dt = max(dt, 1e-3)
+        self.integ += err * dt
+        self.integ = max(-self.integ_clip, min(self.integ, self.integ_clip))
+        deriv = (err - self.prev_err) / dt
+        self.prev_err = err
+        out = self.kp*err + self.ki*self.integ + self.kd*deriv
+        return max(-self.out_clip, min(self.out_clip, out))
+
+# ========= utils =========
+def _clip(v, lo, hi): return max(lo, min(int(v), hi))
+
+def _tight_bbox_from_mask(mask_bool):
+    ys, xs = np.where(mask_bool)
+    if ys.size == 0: return None
+    y0, y1 = int(ys.min()), int(ys.max())+1
+    x0, x1 = int(xs.min()), int(xs.max())+1
+    return x0, y0, x1, y1  # x_min, y_min, x_max(excl), y_max(excl)
+
+def _tpl_to_bin_u8(img_bgr):
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+    _, _, v = cv2.split(hsv)
+    return (v > 100).astype(np.uint8) * 255
+
+def detect_and_measure(img_bgr):
+    """
+    return:
+      vis_bgr, center_xy or None, conf(float), size_x(int), size_y(int), dist_x_cm(float), dist_y_cm(float), dist_avg_cm(float)
+    """
+    H, W = img_bgr.shape[:2]
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+    h, s, v = cv2.split(hsv)
+    mask = (h > HSV_H_LO) & (h < HSV_H_HI) & (s > HSV_S_MIN) & (v > HSV_V_MIN)
+    mask_u8 = (mask.astype(np.uint8) * 255)
+
+    # โหลด template
+    tpl_bins = []
+    for p in TEMPLATE_PATHS:
+        t = cv2.imread(p)
+        if t is None:
+            raise FileNotFoundError(f"ไม่พบไฟล์เทมเพลต: {p}")
+        tpl_bins.append(_tpl_to_bin_u8(t))
+
+    # ตรวจสอบขนาด
+    for i, T in enumerate(tpl_bins):
+        th, tw = T.shape[:2]
+        if th > H or tw > W:
+            raise ValueError(f"Template index {i} ใหญ่กว่าภาพ (th={th}, tw={tw}, H={H}, W={W})")
+
+    # template matching
+    scores = []
+    locs = []
+    sizes = []
+    for T in tpl_bins:
+        val = cv2.matchTemplate(mask_u8, T, cv2.TM_CCOEFF_NORMED)
+        _, m, _, loc = cv2.minMaxLoc(val)
+        scores.append(m); locs.append(loc); sizes.append(T.shape[:2])
+
+    best_idx = int(np.argmax(scores))
+    max_val = float(scores[best_idx])
+    top_left = locs[best_idx]
+    th, tw = sizes[best_idx]
+
+    vis = img_bgr.copy()
+    cx = cy = np.nan
+    size_x = size_y = 0
+    dist_x = dist_y = dist_avg = 0.0
+    center = None
+
+    if max_val > TEMPLATE_MATCH_THRESHOLD:
+        # window จากตำแหน่งแมตช์
+        x0, y0 = int(top_left[0]), int(top_left[1])
+        x1, y1 = x0 + tw, y0 + th
+        x0c, y0c = _clip(x0, 0, W-1), _clip(y0, 0, H-1)
+        x1c, y1c = _clip(x1, 1, W), _clip(y1, 1, H)
+
+        win_mask = mask[y0c:y1c, x0c:x1c]
+        tight = _tight_bbox_from_mask(win_mask)
+        if tight is not None:
+            tx0, ty0, tx1, ty1 = tight
+            X0, Y0 = x0c + tx0, y0c + ty0
+            X1, Y1 = x0c + tx1, y0c + ty1
+            cv2.rectangle(vis, (X0, Y0), (X1, Y1), (0, 255, 0), 2)
+
+            size_x = int(X1 - X0)
+            size_y = int(Y1 - Y0)
+
+            if size_x > 0: dist_x = KPIX_X * OBJ_W_CM / float(size_x)
+            if size_y > 0: dist_y = KPIX_Y * OBJ_H_CM / float(size_y)
+            # ถ้ามีทั้งสองแกน ใช้เฉลี่ย, ถ้ามีแกนเดียว ใช้อันนั้น
+            if dist_x > 0 and dist_y > 0:
+                dist_avg = 0.5 * (dist_x + dist_y)
+            else:
+                dist_avg = max(dist_x, dist_y)
+
+            cx = int((X0 + X1) / 2)
+            cy = int((Y0 + Y1) / 2)
+            center = (cx, cy)
+
+            # วาด crosshair/ข้อความ
+            cv2.circle(vis, (cx, cy), 4, (0, 255, 255), -1)
+            cv2.circle(vis, (W//2, H//2), 4, (255, 0, 0), -1)
+            cv2.line(vis, (W//2, 0), (W//2, H), (255, 0, 0), 1)
+            cv2.line(vis, (0, H//2), (W, H//2), (255, 0, 0), 1)
+            cv2.putText(vis, f"conf={max_val:.2f}  w={size_x}px h={size_y}px",
+                        (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 220, 255), 2)
+            cv2.putText(vis, f"dist_x={dist_x:.2f}cm  dist_y={dist_y:.2f}cm  avg={dist_avg:.2f}cm",
+                        (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 220, 255), 2)
+        else:
+            max_val = 0.0  # หน้าต่างไม่มีพิกเซลผ่าน mask
+    else:
+        # ไม่ผ่านเกณฑ์
+        pass
+
+    return vis, center, max_val, size_x, size_y, dist_x, dist_y, dist_avg
+
+def safe_flush(file_obj, path):
     try:
-        while True:
-            frame = ep_camera.read_cv2_image(strategy="newest")
-            if frame is None:
-                continue
-
-            frame_res, max_val, distance_avg = detect_red_object(frame)
-
-            cv2.imshow("Live (with detection)", frame_res)
-            print(f"Max val: {max_val:.2f}, Distance avg: {distance_avg:.2f} cm")
-
-            if cv2.waitKey(1) & 0xFF in (ord('q'), ord('Q')):
-                break
+        file_obj.flush(); os.fsync(file_obj.fileno())
     except Exception as e:
-        print("Error:", e)
-    finally:
-        cv2.destroyAllWindows()
-        ep_camera.stop_video_stream()
-        ep_robot.close()
+        print("Flush/Fsync error:", repr(e), file=sys.stderr)
+
+def abs_path(p):
+    try: return os.path.abspath(p)
+    except Exception: return p
+
+if __name__ == "__main__":
+    print("Working directory:", abs_path(os.getcwd()))
+    print(f"HFOV={CAMERA_HFOV_DEG:.2f}°, VFOV={CAMERA_VFOV_DEG:.2f}°")
+
+    ep_robot = None; ep_camera = None; ep_gimbal = None
+
+    # ===== CSV (ถ้าอยากเก็บ log) =====
+    LOG_DIR = os.path.join(os.getcwd(), "logs"); os.makedirs(LOG_DIR, exist_ok=True)
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    csv_path = os.path.join(LOG_DIR, f"measure_track_{ts}.csv")
+    print("CSV path:", abs_path(csv_path))
+
+    with open(csv_path, "w", newline="", encoding="utf-8", buffering=1) as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "t_s","dt_s","conf",
+            "cx","cy","size_x","size_y",
+            "dist_x_cm","dist_y_cm","dist_avg_cm",
+            "yaw_err_deg","pitch_err_deg",
+            "pid_yaw","pid_pitch",
+            "yaw_out_deg","pitch_out_deg"
+        ])
+        safe_flush(f, csv_path)
+
+        try:
+            ep_robot = robot.Robot(); ep_robot.initialize(conn_type="ap")
+            ep_gimbal = ep_robot.gimbal
+            ep_camera = ep_robot.camera
+
+            try: ep_gimbal.recenter().wait_for_completed()
+            except Exception: pass
+
+            # ---- seed/subscribe มุมกิมบอล (กันค่าว่าง) ----
+            gimbal_state = {"yaw": 0.0, "pitch": 0.0}
+            _got = {"ok": False}
+            def _gimbal_cb(ang):
+                pitch_angle, yaw_angle, pitch_ground_angle, yaw_ground_angle = ang
+                gimbal_state["yaw"]   = float(yaw_angle)
+                gimbal_state["pitch"] = float(pitch_angle)
+                _got["ok"] = True
+            ep_gimbal.sub_angle(freq=20, callback=_gimbal_cb)
+
+            t_wait0 = time.monotonic()
+            while not _got["ok"] and (time.monotonic()-t_wait0) < 1.0:
+                time.sleep(0.01)
+
+            est_yaw = gimbal_state["yaw"]
+            est_pitch = gimbal_state["pitch"]
+
+            ep_camera.start_video_stream(display=False, resolution="720p")
+            print("เริ่มสตรีม — กด Q เพื่อออก")
+
+            pid_yaw   = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=10.0)
+            pid_pitch = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip= 8.0)
+
+            t0 = time.monotonic(); last_t = t0
+            rows = 0
+
+            while True:
+                frame = ep_camera.read_cv2_image(strategy="newest", timeout=2)
+                now = time.monotonic(); dt = now - last_t; last_t = now
+                if frame is None:
+                    time.sleep(0.01); continue
+
+                vis, center, conf, sx, sy, dx, dy, davg = detect_and_measure(frame)
+
+                yaw_err_deg = pitch_err_deg = 0.0
+                yaw_cmd = pitch_cmd = 0.0
+                cx = cy = ""
+
+                if center is not None:
+                    cx_i, cy_i = center
+                    cx, cy = int(cx_i), int(cy_i)
+
+                    # error เป็นองศาตามสัดส่วนพิกเซล
+                    half_w = CAMERA_W / 2.0
+                    half_h = CAMERA_H / 2.0
+                    err_x = (cx - half_w) / half_w
+                    err_y = (cy - half_h) / half_h
+
+                    yaw_err_deg   =  err_x * (CAMERA_HFOV_DEG/2.0)
+                    pitch_err_deg = -err_y * (CAMERA_VFOV_DEG/2.0)
+
+                    yaw_cmd   = pid_yaw.step(yaw_err_deg, dt)
+                    pitch_cmd = pid_pitch.step(pitch_err_deg, dt)
+
+                    if abs(yaw_cmd) > 0.05 or abs(pitch_cmd) > 0.05:
+                        try:
+                            ep_gimbal.move(yaw=yaw_cmd, pitch=pitch_cmd,
+                                           yaw_speed=GIMBAL_TURN_SPEED, pitch_speed=GIMBAL_TURN_SPEED
+                                           ).wait_for_completed()
+                        except Exception:
+                            try:
+                                ep_gimbal.move(yaw=yaw_cmd, pitch=pitch_cmd,
+                                               yaw_speed=GIMBAL_TURN_SPEED, pitch_speed=GIMBAL_TURN_SPEED)
+                            except Exception:
+                                pass
+                else:
+                    # soften integral ถ้าไม่เห็นเป้า
+                    pid_yaw.integ *= 0.9
+                    pid_pitch.integ *= 0.9
+
+                # อัปเดต estimator ให้ไม่ว่าง
+                est_yaw  += yaw_cmd
+                est_pitch += pitch_cmd
+                yaw_out   = gimbal_state["yaw"]   if isinstance(gimbal_state["yaw"], (int,float)) else est_yaw
+                pitch_out = gimbal_state["pitch"] if isinstance(gimbal_state["pitch"], (int,float)) else est_pitch
+
+                # overlay เพิ่ม
+                cv2.putText(vis, f"dist_avg={davg:.2f} cm", (10, 78),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,220,255), 2)
+                cv2.putText(vis, f"yaw_err={yaw_err_deg:+.2f} pitch_err={pitch_err_deg:+.2f}",
+                            (10, 104), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,220,255), 2)
+                cv2.putText(vis, f"pid_yaw={yaw_cmd:+.2f} pid_pitch={pitch_cmd:+.2f}",
+                            (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,220,255), 2)
+
+                # log
+                writer.writerow([
+                    f"{now - t0:.3f}", f"{dt:.4f}", f"{conf:.3f}",
+                    cx, cy, sx, sy,
+                    f"{dx:.3f}", f"{dy:.3f}", f"{davg:.3f}",
+                    f"{yaw_err_deg:.3f}", f"{pitch_err_deg:.3f}",
+                    f"{yaw_cmd:.3f}", f"{pitch_cmd:.3f}",
+                    f"{yaw_out:.3f}", f"{pitch_out:.3f}",
+                ])
+                rows += 1
+                if rows % FLUSH_EVERY_N_ROWS == 0:
+                    safe_flush(f, csv_path)
+
+                cv2.imshow("Measure + PID track (yellow object)", vis)
+                if cv2.waitKey(1) & 0xFF in (ord('q'), ord('Q')):
+                    break
+
+        except KeyboardInterrupt:
+            print("\n[INFO] KeyboardInterrupt — stopping.")
+        except Exception:
+            print("\n[ERROR] Unhandled exception:", file=sys.stderr)
+            traceback.print_exc()
+        finally:
+            try:
+                if ep_camera is not None: ep_camera.stop_video_stream()
+            except Exception: pass
+            try:
+                if ep_gimbal is not None: ep_gimbal.unsub_angle()
+            except Exception: pass
+            try:
+                if ep_robot is not None: ep_robot.close()
+            except Exception: pass
+            safe_flush(f, csv_path)
+            cv2.destroyAllWindows()
+            try:
+                print(f"CSV saved → {abs_path(csv_path)} ({os.path.getsize(csv_path)} bytes)")
+            except Exception:
+                print(f"CSV saved → {abs_path(csv_path)}")
