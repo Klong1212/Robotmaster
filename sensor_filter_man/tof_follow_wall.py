@@ -51,6 +51,7 @@ if __name__ == "__main__":
     ep_adaptor = ep.sensor_adaptor
     ep_gimbal  = ep.gimbal
     ep_gimbal.recenter().wait_for_completed()
+    time_start = time.time()
     # ---------- Subscriptions ----------
     front_tof_cm = 9999.0
     yaw_deg = 0.0
@@ -164,12 +165,14 @@ if __name__ == "__main__":
                     # HIT ครั้งแรก → หมุนขวา 90° แล้ววิ่งต่อ
                     print(f"[HIT#1] Front TOF={fcm:.1f} cm  → rotate right 90°")
                     rotate_right_deg(angle_deg=90.0, max_rate=MAX_YAW, tol_deg=2.0, timeout_s=4.0)
+                    ep_gimbal.recenter().wait_for_completed()
                     hit_count += 1
                     can_count_hit = False  # ต้องรอให้หน้าปลอดภัยก่อนค่อยนับครั้งต่อไป
                 elif hit_count == 1:
                     # HIT ครั้งที่สอง → หมุนขวา 30° แล้ววิ่งต่อ
                     print(f"[HIT#2] Front TOF={fcm:.1f} cm  → rotate right 30°")
-                    rotate_right_deg(angle_deg=30.0, max_rate=MAX_YAW, tol_deg=2.0, timeout_s=2.0)
+                    rotate_right_deg(angle_deg=60.0, max_rate=MAX_YAW, tol_deg=2.0, timeout_s=2.0)
+                    ep_gimbal.recenter().wait_for_completed()
                     hit_count += 1
                     can_count_hit = False
                 elif hit_count == 2:
@@ -250,3 +253,6 @@ if __name__ == "__main__":
         ep_sensor.unsub_distance()
         ep_chassis.unsub_attitude()
         ep.close()
+        time_end = time.time()
+        elapsed = time_end - time_start
+        print(f"เวลาการเคลื่อนที่: {elapsed:.2f} วินาที")
